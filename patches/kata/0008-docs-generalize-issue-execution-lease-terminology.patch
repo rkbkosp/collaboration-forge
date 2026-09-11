@@ -1,0 +1,145 @@
+From 34fadad485f462ae1cecab1db1daf6c334b7fcae Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 10:03:48 +0800
+Subject: [PATCH 8/8] docs: generalize issue execution lease terminology
+
+---
+ cmd/kata/federation_lease.go   | 12 ++++-----
+ docs/reference/issue-leases.md | 46 ++++++++++++++++++++++++++++++++++
+ docs/workflows/agents.md       |  9 ++++---
+ 3 files changed, 57 insertions(+), 10 deletions(-)
+ create mode 100644 docs/reference/issue-leases.md
+
+diff --git a/cmd/kata/federation_lease.go b/cmd/kata/federation_lease.go
+index 3b34ef7..e061942 100644
+--- a/cmd/kata/federation_lease.go
++++ b/cmd/kata/federation_lease.go
+@@ -23,7 +23,7 @@ const (
+ func newFederationLeaseCmd() *cobra.Command {
+ 	cmd := &cobra.Command{
+ 		Use:   "lease",
+-		Short: "manage federation write leases",
++		Short: "manage issue execution/write leases",
+ 	}
+ 	cmd.AddCommand(newFederationLeaseAcquireCmd(), newFederationLeaseRenewCmd(), newFederationLeaseReleaseCmd(),
+ 		newFederationLeaseForceReleaseCmd(), newFederationLeaseStealCmd())
+@@ -34,7 +34,7 @@ func newFederationLeaseAcquireCmd() *cobra.Command {
+ 	var ttlRaw string
+ 	cmd := &cobra.Command{
+ 		Use:   "acquire <issue-ref>",
+-		Short: "acquire the federation write lease for an issue",
++		Short: "acquire the execution/write lease for an issue",
+ 		Args:  cobra.ExactArgs(1),
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			ttl, timed, err := parseClaimTTL(ttlRaw)
+@@ -52,7 +52,7 @@ func newFederationLeaseRenewCmd() *cobra.Command {
+ 	var ttlRaw string
+ 	cmd := &cobra.Command{
+ 		Use:   "renew <issue-ref>",
+-		Short: "renew a timed federation write lease",
++		Short: "renew a timed issue execution/write lease",
+ 		Args:  cobra.ExactArgs(1),
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			ttl, timed, err := parseClaimTTL(ttlRaw)
+@@ -72,7 +72,7 @@ func newFederationLeaseRenewCmd() *cobra.Command {
+ func newFederationLeaseReleaseCmd() *cobra.Command {
+ 	return &cobra.Command{
+ 		Use:   "release <issue-ref>",
+-		Short: "release your federation write lease on an issue",
++		Short: "release your execution/write lease on an issue",
+ 		Args:  cobra.ExactArgs(1),
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			return runClaimAction(cmd, args[0], "release", 0, false)
+@@ -82,7 +82,7 @@ func newFederationLeaseReleaseCmd() *cobra.Command {
+ 
+ func newFederationLeaseForceReleaseCmd() *cobra.Command {
+ 	cmd := newClaimForceReleaseCmd()
+-	cmd.Short = "force-release any federation write lease on an issue as an administrator"
++	cmd.Short = "force-release any issue execution/write lease as an administrator"
+ 	return cmd
+ }
+ 
+@@ -96,7 +96,7 @@ func newClaimForceReleaseCmd() *cobra.Command {
+ 	var reason string
+ 	cmd := &cobra.Command{
+ 		Use:   "force-release <issue-ref>",
+-		Short: "force-release any federation write lease on an issue as an administrator",
++		Short: "force-release any issue execution/write lease as an administrator",
+ 		Args:  cobra.ExactArgs(1),
+ 		RunE: func(cmd *cobra.Command, args []string) error {
+ 			actor, err := explicitClaimAdminActor(cmd)
+diff --git a/docs/reference/issue-leases.md b/docs/reference/issue-leases.md
+new file mode 100644
+index 0000000..037e2eb
+--- /dev/null
++++ b/docs/reference/issue-leases.md
+@@ -0,0 +1,46 @@
++# Issue execution leases
++
++Owner/Assignee records long-term responsibility. An issue execution/write lease
++records one current execution tenure. `kata claim` still assigns an owner; it is
++not an execution lease operation.
++
++Lease authority is local for standalone projects and enabled federation hubs.
++Enabled spokes forward to their hub and only cache its response. Disabled
++bindings do not grant authority. A lease operation only opportunistically
++expires claims in its target project; the background sweeper handles active
++standalone/hub projects and never sweeps spoke caches locally.
++
++The existing HTTP lease routes work for standalone and federation projects:
++
++```text
++GET  /api/v1/projects/{project_id}/issues/{ref}/lease
++POST /api/v1/projects/{project_id}/issues/{ref}/lease/actions/acquire
++POST /api/v1/projects/{project_id}/issues/{ref}/lease/actions/renew
++POST /api/v1/projects/{project_id}/issues/{ref}/lease/actions/release
++POST /api/v1/projects/{project_id}/issues/{ref}/lease/actions/force_release
++```
++
++Use timed leases for agents. Renew automatically well before TTL; graceful
++release is best-effort, while process failure is recovered by expiry. A repeated
++acquire by the same exact principal returns the same ClaimUID, without renewing
++it. A different tenure needs a new execution identity. Retry an uncertain
++acquire with its original attempt identity, not a new HTTP-request identity.
++
++`lease` and `lease_hub_now` remain the shared show fields (the timestamp is local
++for standalone projects). No second standalone lease wire model exists. The
++legacy CLI namespace `kata federation lease` is retained; it does not imply
++that standalone API clients need a federation binding. Force-release remains
++an administrator/host-policy operation and is refused locally on spokes.
++
++Ordinary standalone mutation policy is unchanged: possession of a lease does
++not globally lock comments, links, owner assignment, or other legacy mutations.
++Embedding hosts must enforce worker capabilities server-side. Comments remain
++a shared contribution channel, not an execution-holder privilege.
++
++For strict worker close use [close-v2](http-api.md#exact-execution-lease-close):
++exact ClaimUID and principal validation, issue close, and lease release happen
++in one transaction. Retry with the same Idempotency-Key to recover a receipt
++after release. No lease, expired lease, wrong tenure, wrong holder, or a spoke
++cache cannot authorize strict close. Legacy closes remain available according
++to host policy; they release a live authoritative lease without broadening
++federation violation auditing to standalone projects.
+diff --git a/docs/workflows/agents.md b/docs/workflows/agents.md
+index e0a82ac..c39317a 100644
+--- a/docs/workflows/agents.md
++++ b/docs/workflows/agents.md
+@@ -171,10 +171,11 @@ continuing or handing off work:
+ kata status abc4 --agent
+ ```
+ 
+-Ownership records who is responsible. A federation write lease reserves the
+-issue for a holder while the lease is live. They are separate: a local claim
+-normally reports `hold=assigned`, without a federation lease. For timed leases,
+-see [renewal](../operations/federation.md#leases-and-write-gates).
++Ownership records who is responsible. An issue execution/write lease records
++one execution's live tenure. They are separate: `kata claim` assigns an owner,
++not an execution lease. Standalone projects use local lease authority;
++federated spokes use their hub. See [issue leases](../reference/issue-leases.md)
++for timed renewal, strict close, and the server-side worker policy boundary.
+ 
+ Use `ready` when you want to inspect a filtered queue instead of choosing one
+ issue:
+-- 
+2.50.1 (Apple Git-155)
+

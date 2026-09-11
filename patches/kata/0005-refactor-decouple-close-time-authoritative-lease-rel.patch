@@ -1,0 +1,702 @@
+From f5a312dc72ad22d1517fa5417e775a843818469b Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 09:34:11 +0800
+Subject: [PATCH 5/8] refactor: decouple close-time authoritative lease release
+
+---
+ internal/db/dbtest/conformance.go             |  41 +++
+ .../db/dbtest/conformance_claims_close.go     | 336 ++++++++++++++++++
+ internal/db/pgstore/conformance_test.go       |  19 +
+ .../db/pgstore/federation_ingest_claims.go    |  58 ++-
+ internal/db/pgstore/issue_lifecycle.go        |  10 +-
+ internal/db/sqlitestore/claims.go             |  59 ++-
+ internal/db/sqlitestore/conformance_test.go   |  13 +
+ internal/db/sqlitestore/queries.go            |  19 +-
+ 8 files changed, 528 insertions(+), 27 deletions(-)
+ create mode 100644 internal/db/dbtest/conformance_claims_close.go
+
+diff --git a/internal/db/dbtest/conformance.go b/internal/db/dbtest/conformance.go
+index 514b0a2..a8b1db4 100644
+--- a/internal/db/dbtest/conformance.go
++++ b/internal/db/dbtest/conformance.go
+@@ -26,6 +26,7 @@ type Backend struct {
+ 	SeedClaimViolation             func(context.Context, db.Storage, db.Project, db.Issue, string, json.RawMessage) error
+ 	SeedUnsupportedFederationEvent func(context.Context, db.Storage, db.Project, string) error
+ 	BackdateCommentCreated         func(context.Context, db.Storage, int64, time.Time) error
++	InstallClaimReleaseFailure     func(context.Context, db.Storage) (func() error, error)
+ 	InstallEnrollmentInsertFailure func(context.Context, db.Storage) (func() error, error)
+ 	InstallEnrollmentRotationStage func(db.Storage, func(context.Context) error) func()
+ 	ExpectedFailures               map[string]error
+@@ -327,6 +328,46 @@ var storageScenarios = []scenario{
+ 		},
+ 		run: checkClaimLeaseLifecycle,
+ 	},
++	{
++		name: "claim close authority",
++		methods: []string{
++			"AcquireClaim", "ApplyClaimStatus", "ClaimStatusReadOnly", "CloseIssueWithEvents",
++			"CreateIssue", "CreateProject", "EventsAfter", "MaxEventID", "UpsertFederationBinding",
++		},
++		run: checkClaimCloseAuthority,
++	},
++	{
++		name: "claim close recurrence",
++		methods: []string{
++			"AcquireClaim", "CloseIssueWithEvents", "CreateProject", "CreateRecurrence",
++			"EnableProjectFederation", "EventsAfter", "MaterializeNext", "MaxEventID",
++		},
++		run: checkClaimCloseRecurrence,
++	},
++	{
++		name: "claim close refusal",
++		methods: []string{
++			"AcquireClaim", "ClaimStatusReadOnly", "CloseIssueWithEvents", "CreateIssue", "CreateProject",
++			"EnableProjectFederation", "EventsAfter", "IssueByID", "MaxEventID",
++		},
++		run: checkClaimCloseRefusal,
++	},
++	{
++		name: "claim close rollback",
++		methods: []string{
++			"AcquireClaim", "ClaimStatusReadOnly", "CloseIssueWithEvents", "CreateIssue", "CreateProject",
++			"EnableProjectFederation", "EventsAfter", "IssueByID", "MaxEventID",
++		},
++		runWithBackend: checkClaimCloseRollback,
++	},
++	{
++		name: "claim close ingest",
++		methods: []string{
++			"AcquireClaim", "ClaimStatusReadOnly", "CreateIssue", "CreateProject", "EnableProjectFederation",
++			"EventsAfter", "IngestFederationEvents", "IssueByID", "MaxEventID",
++		},
++		run: checkClaimCloseIngest,
++	},
+ 	{
+ 		name: "claim lazy expiry project isolation",
+ 		methods: []string{
+diff --git a/internal/db/dbtest/conformance_claims_close.go b/internal/db/dbtest/conformance_claims_close.go
+new file mode 100644
+index 0000000..337e79f
+--- /dev/null
++++ b/internal/db/dbtest/conformance_claims_close.go
+@@ -0,0 +1,336 @@
++package dbtest
++
++import (
++	"context"
++	"encoding/json"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/db"
++	"go.kenn.io/kata/internal/uid"
++)
++
++// Closing work releases only a live lease for which this store is authoritative.
++// Standalone close must not opt into federation's uncovered-work audit policy.
++func checkClaimCloseAuthority(t *testing.T, store db.Storage) error {
++	ctx := context.Background()
++	for _, role := range []string{"standalone", "hub", "spoke", "disabled-hub", "disabled-spoke"} {
++		for _, kind := range []string{"hard", "timed", "expired"} {
++			t.Run(role+"/"+kind, func(t *testing.T) {
++				project, err := store.CreateProject(ctx, "close-"+role+"-"+kind)
++				require.NoError(t, err)
++				issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{
++					ProjectID: project.ID, Title: "claimed close", Author: "worker",
++				})
++				require.NoError(t, err)
++				if role != "standalone" {
++					bindingRole := db.FederationRoleHub
++					if role == "spoke" || role == "disabled-spoke" {
++						bindingRole = db.FederationRoleSpoke
++					}
++					_, err = store.UpsertFederationBinding(ctx, db.FederationBinding{
++						ProjectID: project.ID, Role: bindingRole, HubProjectUID: project.UID,
++						HubURL: "https://hub.example", HubProjectID: 42,
++						Enabled: role == "hub" || role == "spoke", PushEnabled: true, Actor: "other-worker",
++					})
++					require.NoError(t, err)
++				}
++				now := time.Now().UTC()
++				acquiredAt, claimKind := now, kind
++				if kind == "expired" {
++					acquiredAt, claimKind = now.Add(-2*time.Hour), "timed"
++				}
++				principal := db.ClaimPrincipal{
++					HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent",
++				}
++				if role == "spoke" || role == "disabled-spoke" {
++					claimUID, err := uid.New()
++					require.NoError(t, err)
++					principal.HolderInstanceUID, err = uid.New()
++					require.NoError(t, err)
++					cached := db.IssueClaim{
++						ClaimUID: claimUID, IssueUID: issue.UID, Holder: principal.Holder,
++						HolderInstanceUID: principal.HolderInstanceUID, ClientKind: principal.ClientKind,
++						ClaimKind: claimKind, AcquiredAt: acquiredAt, UpdatedAt: acquiredAt, Revision: 7,
++					}
++					if claimKind == "timed" {
++						expiresAt := acquiredAt.Add(time.Hour)
++						cached.ExpiresAt = &expiresAt
++					}
++					require.NoError(t, store.ApplyClaimStatus(ctx, project.ID, issue.UID, db.ClaimStatus{
++						Held: true, Holder: principal, Claim: &cached, HubNow: acquiredAt,
++					}))
++				} else {
++					ttl := time.Duration(0)
++					if claimKind == "timed" {
++						ttl = time.Hour
++					}
++					_, err = store.AcquireClaim(ctx, db.AcquireClaimParams{
++						ProjectID: project.ID, IssueRef: issue.UID, Principal: principal,
++						ClaimKind: claimKind, TTL: ttl, Now: acquiredAt,
++					})
++					require.NoError(t, err)
++				}
++				before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, now)
++				require.NoError(t, err)
++				require.True(t, before.Held)
++				cursor, err := store.MaxEventID(ctx)
++				require.NoError(t, err)
++				closed, events, changed, err := store.CloseIssueWithEvents(
++					ctx, issue.ID, "done", "other-worker", "completed", nil,
++				)
++				require.NoError(t, err)
++				assert.True(t, changed)
++				assert.Equal(t, "closed", closed.Status)
++				want := []string{"issue.closed"}
++				releases := (role == "standalone" || role == "hub") && kind != "expired"
++				if role == "hub" && kind != "expired" {
++					want = append(want, "claim.violated")
++				}
++				if releases {
++					want = append(want, "claim.released")
++				} else if role == "hub" && kind == "expired" {
++					want = append(want, "claim.expired")
++				}
++				assert.Equal(t, want, eventTypeNames(events))
++				durable, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: cursor, Limit: 100})
++				require.NoError(t, err)
++				assert.Equal(t, eventUIDs(events), eventUIDs(durable))
++				after, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, now)
++				require.NoError(t, err)
++				if releases || (role == "hub" && kind == "expired") {
++					assert.False(t, after.Held)
++				} else {
++					assert.True(t, after.Held)
++					assert.Equal(t, before.Claim, after.Claim, "cached or expired standalone claims stay unchanged")
++				}
++				if releases && len(events) == len(want) {
++					var payload struct {
++						ClaimUID string `json:"claim_uid"`
++						Reason   string `json:"reason"`
++					}
++					released := events[len(events)-1]
++					require.NoError(t, json.Unmarshal([]byte(released.Payload), &payload))
++					assert.Equal(t, before.Claim.ClaimUID, payload.ClaimUID)
++					assert.Equal(t, "issue_closed", payload.Reason)
++					assert.Equal(t, "other-worker", released.Actor)
++				}
++				_, repeatedEvents, repeatedChanged, err := store.CloseIssueWithEvents(
++					ctx, issue.ID, "done", "other-worker", "retry", nil,
++				)
++				require.NoError(t, err)
++				assert.False(t, repeatedChanged)
++				assert.Empty(t, repeatedEvents)
++			})
++		}
++	}
++	return nil
++}
++
++func checkClaimCloseRecurrence(t *testing.T, store db.Storage) error {
++	ctx := context.Background()
++	for _, role := range []string{"standalone", "hub"} {
++		t.Run(role, func(t *testing.T) {
++			project, err := store.CreateProject(ctx, "recurring-close-"+role)
++			require.NoError(t, err)
++			if role == "hub" {
++				_, err = store.EnableProjectFederation(ctx, project.ID, "operator")
++				require.NoError(t, err)
++			}
++			rec, _, err := store.CreateRecurrence(ctx, db.CreateRecurrenceIn{
++				ProjectID: project.ID, Actor: "worker", Rule: "FREQ=DAILY", DTStart: "2026-07-01",
++				Timezone: "UTC", Template: db.RecurrenceTemplate{Title: "recurring claimed work"},
++			})
++			require.NoError(t, err)
++			occurrence, err := store.MaterializeNext(ctx, rec.ID, "2026-07-01", "worker")
++			require.NoError(t, err)
++			_, err = store.AcquireClaim(ctx, db.AcquireClaimParams{
++				ProjectID: project.ID, IssueRef: occurrence.NewIssueUID, ClaimKind: "hard",
++				Principal: db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"},
++			})
++			require.NoError(t, err)
++			cursor, err := store.MaxEventID(ctx)
++			require.NoError(t, err)
++			_, events, changed, err := store.CloseIssueWithEvents(
++				ctx, occurrence.NewIssueID, "done", "other-worker", "completed", nil,
++			)
++			require.NoError(t, err)
++			assert.True(t, changed)
++			want := []string{"issue.closed"}
++			if role == "hub" {
++				want = append(want, "claim.violated")
++			}
++			want = append(want, "claim.released", "issue.created", "recurrence.materialized")
++			assert.Equal(t, want, eventTypeNames(events))
++			durable, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: cursor, Limit: 100})
++			require.NoError(t, err)
++			assert.Equal(t, eventUIDs(durable), eventUIDs(events), "release must not be duplicated when loading recurrence events")
++		})
++	}
++	return nil
++}
++
++func checkClaimCloseRefusal(t *testing.T, store db.Storage) error {
++	ctx := context.Background()
++	for _, role := range []string{"standalone", "hub"} {
++		for _, kind := range []string{"hard", "timed"} {
++			t.Run(role+"/"+kind, func(t *testing.T) {
++				project, err := store.CreateProject(ctx, "refused-close-"+role+"-"+kind)
++				require.NoError(t, err)
++				if role == "hub" {
++					_, err = store.EnableProjectFederation(ctx, project.ID, "operator")
++					require.NoError(t, err)
++				}
++				parent, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "parent", Author: "worker"})
++				require.NoError(t, err)
++				_, _, err = store.CreateIssue(ctx, db.CreateIssueParams{
++					ProjectID: project.ID, Title: "open child", Author: "worker",
++					Links: []db.InitialLink{{Type: "parent", ToNumber: parent.ID}},
++				})
++				require.NoError(t, err)
++				ttl := time.Duration(0)
++				if kind == "timed" {
++					ttl = time.Hour
++				}
++				_, err = store.AcquireClaim(ctx, db.AcquireClaimParams{
++					ProjectID: project.ID, IssueRef: parent.UID, ClaimKind: kind, TTL: ttl,
++					Principal: db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"},
++				})
++				require.NoError(t, err)
++				before, err := store.ClaimStatusReadOnly(ctx, project.ID, parent.UID, time.Now())
++				require.NoError(t, err)
++				cursor, err := store.MaxEventID(ctx)
++				require.NoError(t, err)
++				_, _, _, err = store.CloseIssueWithEvents(ctx, parent.ID, "done", "worker", "not ready", nil)
++				require.ErrorIs(t, err, db.ErrOpenChildren)
++				after, err := store.ClaimStatusReadOnly(ctx, project.ID, parent.UID, time.Now())
++				require.NoError(t, err)
++				assert.True(t, after.Held)
++				assert.Equal(t, before.Claim, after.Claim)
++				unchanged, err := store.IssueByID(ctx, parent.ID)
++				require.NoError(t, err)
++				assert.Equal(t, "open", unchanged.Status)
++				events, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: cursor, Limit: 100})
++				require.NoError(t, err)
++				assert.Empty(t, events)
++			})
++		}
++	}
++	return nil
++}
++
++// Failure after the lease row was released must roll back the close, audit,
++// and lease update together, not strand a closed issue or a released lease.
++func checkClaimCloseRollback(t *testing.T, store db.Storage, backend Backend) error {
++	ctx := context.Background()
++	require.NotNil(t, backend.InstallClaimReleaseFailure)
++	for _, role := range []string{"standalone", "hub"} {
++		for _, kind := range []string{"hard", "timed"} {
++			t.Run(role+"/"+kind, func(t *testing.T) {
++				project, err := store.CreateProject(ctx, "rollback-close-"+role+"-"+kind)
++				require.NoError(t, err)
++				if role == "hub" {
++					_, err = store.EnableProjectFederation(ctx, project.ID, "operator")
++					require.NoError(t, err)
++				}
++				issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{
++					ProjectID: project.ID, Title: "atomic close", Author: "worker",
++				})
++				require.NoError(t, err)
++				ttl := time.Duration(0)
++				if kind == "timed" {
++					ttl = time.Hour
++				}
++				_, err = store.AcquireClaim(ctx, db.AcquireClaimParams{
++					ProjectID: project.ID, IssueRef: issue.UID, ClaimKind: kind, TTL: ttl,
++					Principal: db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"},
++				})
++				require.NoError(t, err)
++				before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++				require.NoError(t, err)
++				cursor, err := store.MaxEventID(ctx)
++				require.NoError(t, err)
++				removeFailure, err := backend.InstallClaimReleaseFailure(ctx, store)
++				require.NoError(t, err)
++				defer func() { require.NoError(t, removeFailure()) }()
++				_, _, _, err = store.CloseIssueWithEvents(ctx, issue.ID, "done", "other-worker", "completed", nil)
++				require.Error(t, err, "close must fail when its release event cannot be inserted")
++				after, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++				require.NoError(t, err)
++				assert.True(t, after.Held)
++				assert.Equal(t, before.Claim, after.Claim)
++				unchanged, err := store.IssueByID(ctx, issue.ID)
++				require.NoError(t, err)
++				assert.Equal(t, issue, unchanged)
++				events, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: cursor, Limit: 100})
++				require.NoError(t, err)
++				assert.Empty(t, events)
++			})
++		}
++	}
++	return nil
++}
++
++func checkClaimCloseIngest(t *testing.T, store db.Storage) error {
++	ctx := context.Background()
++	project, err := store.CreateProject(ctx, "ingest-close-hub")
++	require.NoError(t, err)
++	_, err = store.EnableProjectFederation(ctx, project.ID, "operator")
++	require.NoError(t, err)
++	spokeUID, err := uid.New()
++	require.NoError(t, err)
++	for index, holder := range []string{"sync-worker", "other-worker"} {
++		t.Run(holder, func(t *testing.T) {
++			issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{
++				ProjectID: project.ID, Title: "remote close", Author: "worker",
++			})
++			require.NoError(t, err)
++			_, err = store.AcquireClaim(ctx, db.AcquireClaimParams{
++				ProjectID: project.ID, IssueRef: issue.UID, ClaimKind: "hard",
++				Principal: db.ClaimPrincipal{HolderInstanceUID: spokeUID, Holder: holder, ClientKind: "agent"},
++			})
++			require.NoError(t, err)
++			cursor, err := store.MaxEventID(ctx)
++			require.NoError(t, err)
++			remote := newRemoteEvent(t, project, &issue.UID, "issue.closed", "sync-worker", spokeUID,
++				time.Now().Add(time.Hour).UnixMilli(), json.RawMessage(`{"reason":"done","closed_at":"2026-07-01T12:00:00.000Z"}`))
++			params := db.FederationIngestParams{
++				ProjectID: project.ID, SpokeInstanceUID: spokeUID, BoundActor: "sync-worker",
++				Events: []db.FederationIngestEvent{{SourceEventID: int64(index + 1), Event: remote}},
++			}
++			result, err := store.IngestFederationEvents(ctx, params)
++			require.NoError(t, err)
++			assert.Equal(t, 1, result.Accepted)
++			events, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: cursor, Limit: 100})
++			require.NoError(t, err)
++			want := []string{"issue.closed"}
++			if holder != "sync-worker" {
++				want = append(want, "claim.violated")
++			}
++			want = append(want, "claim.released")
++			assert.Equal(t, want, eventTypeNames(events))
++			assert.Equal(t, eventUIDs(events), result.InsertedEventUIDs)
++			status, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			assert.False(t, status.Held)
++			closed, err := store.IssueByID(ctx, issue.ID)
++			require.NoError(t, err)
++			assert.Equal(t, "closed", closed.Status)
++			retry, err := store.IngestFederationEvents(ctx, params)
++			require.NoError(t, err)
++			assert.Equal(t, 1, retry.Duplicates)
++			assert.Empty(t, retry.InsertedEventUIDs)
++		})
++	}
++	return nil
++}
++
++func eventUIDs(events []db.Event) []string {
++	uids := make([]string, len(events))
++	for index, event := range events {
++		uids[index] = event.UID
++	}
++	return uids
++}
+diff --git a/internal/db/pgstore/conformance_test.go b/internal/db/pgstore/conformance_test.go
+index 42c37e7..fa96b41 100644
+--- a/internal/db/pgstore/conformance_test.go
++++ b/internal/db/pgstore/conformance_test.go
+@@ -82,6 +82,25 @@ hlc_physical_ms,hlc_counter,content_hash
+ 				project.Name, "project.restored", "worker", `{}`, strings.Repeat("e", 64))
+ 			return err
+ 		},
++		InstallClaimReleaseFailure: func(ctx context.Context, store db.Storage) (func() error, error) {
++			postgresStore := store.(*pgstore.Store)
++			_, err := postgresStore.ExecContext(ctx, `
++				CREATE FUNCTION fail_claim_release_event() RETURNS trigger LANGUAGE plpgsql AS $$
++				BEGIN
++					RAISE EXCEPTION 'injected claim release event failure';
++				END
++				$$;
++				CREATE TRIGGER fail_claim_release_event BEFORE INSERT ON events
++				FOR EACH ROW WHEN (NEW.type = 'claim.released')
++				EXECUTE FUNCTION fail_claim_release_event()`)
++			return func() error {
++				if _, dropErr := postgresStore.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS fail_claim_release_event ON events`); dropErr != nil {
++					return dropErr
++				}
++				_, dropErr := postgresStore.ExecContext(context.Background(), `DROP FUNCTION IF EXISTS fail_claim_release_event()`)
++				return dropErr
++			}, err
++		},
+ 		InstallEnrollmentInsertFailure: func(ctx context.Context, store db.Storage) (func() error, error) {
+ 			postgresStore := store.(*pgstore.Store)
+ 			_, err := postgresStore.ExecContext(ctx, `
+diff --git a/internal/db/pgstore/federation_ingest_claims.go b/internal/db/pgstore/federation_ingest_claims.go
+index d176de1..98b6f84 100644
+--- a/internal/db/pgstore/federation_ingest_claims.go
++++ b/internal/db/pgstore/federation_ingest_claims.go
+@@ -55,6 +55,15 @@ func (s *Store) annotateFederationIngestClaimWorkTx(
+ 			return nil, auditErr
+ 		}
+ 		output = append(output, events...)
++		if event.Type == "issue.closed" {
++			released, err := s.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, project, issue, event.Actor)
++			if err != nil {
++				return nil, err
++			}
++			if released != nil {
++				output = append(output, *released)
++			}
++		}
+ 	}
+ 	return output, nil
+ }
+@@ -95,6 +104,47 @@ func federationIngestClaimAuditIssueUIDs(
+ 	return output, nil
+ }
+ 
++// releaseLiveAuthoritativeClaimOnCloseTx is close lifecycle cleanup, not a
++// federation violation audit. No binding means local authority; only an enabled
++// hub binding retains it. Spoke caches and disabled bindings stay untouched.
++func (s *Store) releaseLiveAuthoritativeClaimOnCloseTx(
++	ctx context.Context,
++	tx *sql.Tx,
++	project db.Project,
++	issue db.Issue,
++	actor string,
++) (*db.Event, error) {
++	var authoritative bool
++	if err := tx.QueryRowContext(ctx, `SELECT NOT EXISTS (
++		SELECT 1 FROM federation_bindings
++		 WHERE project_id=$1 AND (enabled != 1 OR role != $2))`,
++		project.ID, string(db.FederationRoleHub)).Scan(&authoritative); err != nil {
++		return nil, mapSQLError(err, nil)
++	}
++	if !authoritative {
++		return nil, nil
++	}
++	live, err := claimForIssueTx(ctx, tx, issue.UID, true)
++	if errors.Is(err, db.ErrNotFound) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	now := time.Now().UTC()
++	// Unreleased is not necessarily live. Leave expired leases to the existing
++	// expiry paths rather than reporting them as released by this close.
++	if claimTimedExpired(live, now) {
++		return nil, nil
++	}
++	_, event, err := s.releaseClaimTx(ctx, tx, project, issue, live,
++		"claim.released", actor, "issue_closed", now)
++	if err != nil {
++		return nil, err
++	}
++	return &event, nil
++}
++
+ type claimWorkMutationInput struct {
+ 	Project           db.Project
+ 	Issue             db.Issue
+@@ -133,14 +183,6 @@ func (s *Store) annotateClaimWorkMutationTx(
+ 		}
+ 		events = append(events, violation)
+ 	}
+-	if input.EventType == "issue.closed" {
+-		_, released, err := s.releaseClaimTx(ctx, tx, input.Project, input.Issue, live,
+-			"claim.released", input.Actor, "issue_closed", time.Now().UTC())
+-		if err != nil {
+-			return nil, err
+-		}
+-		events = append(events, released)
+-	}
+ 	return events, nil
+ }
+ 
+diff --git a/internal/db/pgstore/issue_lifecycle.go b/internal/db/pgstore/issue_lifecycle.go
+index 8f061a5..4e5d094 100644
+--- a/internal/db/pgstore/issue_lifecycle.go
++++ b/internal/db/pgstore/issue_lifecycle.go
+@@ -374,10 +374,14 @@ func (s *Store) closeIssueWithEvents(
+ 			return err
+ 		}
+ 		events = append(events, auditEvents...)
+-		lastEventID := created.ID
+-		if len(auditEvents) > 0 {
+-			lastEventID = auditEvents[len(auditEvents)-1].ID
++		released, err := s.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, project, current, p.Actor)
++		if err != nil {
++			return err
++		}
++		if released != nil {
++			events = append(events, *released)
+ 		}
++		lastEventID := events[len(events)-1].ID
+ 		if p.Reason == "done" && current.RecurrenceID != nil && current.OccurrenceKey != nil {
+ 			if _, err := s.materializeNextTx(
+ 				ctx, tx, *current.RecurrenceID, *current.OccurrenceKey, p.Actor,
+diff --git a/internal/db/sqlitestore/claims.go b/internal/db/sqlitestore/claims.go
+index cea6a1d..faeb106 100644
+--- a/internal/db/sqlitestore/claims.go
++++ b/internal/db/sqlitestore/claims.go
+@@ -1090,6 +1090,46 @@ func (d *Store) releaseClaimTx(
+ 	return released, evt, nil
+ }
+ 
++// releaseLiveAuthoritativeClaimOnCloseTx is close lifecycle cleanup, not a
++// federation violation audit. No binding means local authority; only an enabled
++// hub binding retains it. Spoke caches and disabled bindings stay untouched.
++func (d *Store) releaseLiveAuthoritativeClaimOnCloseTx(
++	ctx context.Context,
++	tx claimStore,
++	issue db.Issue,
++	projectName, actor string,
++) (*db.Event, error) {
++	var authoritative bool
++	if err := tx.QueryRowContext(ctx, `SELECT NOT EXISTS (
++		SELECT 1 FROM federation_bindings
++		 WHERE project_id = ? AND (enabled != 1 OR role != ?))`,
++		issue.ProjectID, string(db.FederationRoleHub)).Scan(&authoritative); err != nil {
++		return nil, fmt.Errorf("check close claim authority: %w", err)
++	}
++	if !authoritative {
++		return nil, nil
++	}
++	live, err := liveClaimForIssueTx(ctx, tx, issue.UID)
++	if errors.Is(err, db.ErrNotFound) {
++		return nil, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	now := time.Now().UTC()
++	// Unreleased is not necessarily live. Leave expired leases to the existing
++	// expiry paths rather than reporting them as released by this close.
++	if claimTimedExpiredThisPass(live, now) {
++		return nil, nil
++	}
++	_, event, err := d.releaseClaimTx(ctx, tx, live, issue.ID, projectName,
++		"claim.released", actor, "issue_closed", now)
++	if err != nil {
++		return nil, err
++	}
++	return &event, nil
++}
++
+ type claimWorkMutationInput struct {
+ 	ProjectID         int64
+ 	ProjectName       string
+@@ -1153,6 +1193,17 @@ func (d *Store) annotateFederationIngestClaimWorkTx(
+ 			return nil, err
+ 		}
+ 		events = append(events, auditEvents...)
++		if ev.Type == "issue.closed" {
++			released, err := d.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, db.Issue{
++				ID: target.IssueID, ProjectID: target.ProjectID, UID: issue.UID,
++			}, target.ProjectName, ev.Actor)
++			if err != nil {
++				return nil, err
++			}
++			if released != nil {
++				events = append(events, *released)
++			}
++		}
+ 	}
+ 	return events, nil
+ }
+@@ -1261,14 +1312,6 @@ func (d *Store) annotateClaimWorkMutationTx(
+ 		}
+ 		events = append(events, evt)
+ 	}
+-	if in.EventType == "issue.closed" {
+-		_, evt, err := d.releaseClaimTx(ctx, tx, live, in.IssueID, in.ProjectName,
+-			"claim.released", in.Actor, "issue_closed", time.Now().UTC())
+-		if err != nil {
+-			return nil, err
+-		}
+-		events = append(events, evt)
+-	}
+ 	return events, nil
+ }
+ 
+diff --git a/internal/db/sqlitestore/conformance_test.go b/internal/db/sqlitestore/conformance_test.go
+index 9b77574..5221cf5 100644
+--- a/internal/db/sqlitestore/conformance_test.go
++++ b/internal/db/sqlitestore/conformance_test.go
+@@ -59,6 +59,19 @@ hlc_physical_ms,hlc_counter,content_hash
+ 				"project.restored", "worker", `{}`, strings.Repeat("e", 64))
+ 			return err
+ 		},
++		InstallClaimReleaseFailure: func(ctx context.Context, store db.Storage) (func() error, error) {
++			sqlStore := store.(*sqlitestore.Store)
++			_, err := sqlStore.ExecContext(ctx, `
++				CREATE TRIGGER fail_claim_release_event
++				BEFORE INSERT ON events WHEN NEW.type = 'claim.released'
++				BEGIN
++					SELECT RAISE(FAIL, 'injected claim release event failure');
++				END`)
++			return func() error {
++				_, dropErr := sqlStore.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS fail_claim_release_event`)
++				return dropErr
++			}, err
++		},
+ 		InstallEnrollmentInsertFailure: func(ctx context.Context, store db.Storage) (func() error, error) {
+ 			sqlStore := store.(*sqlitestore.Store)
+ 			_, err := sqlStore.ExecContext(ctx, `
+diff --git a/internal/db/sqlitestore/queries.go b/internal/db/sqlitestore/queries.go
+index 9a0dd86..f1e4b66 100644
+--- a/internal/db/sqlitestore/queries.go
++++ b/internal/db/sqlitestore/queries.go
+@@ -1444,10 +1444,9 @@ func (d *Store) CloseIssue(
+ 	return updated, &events[0], changed, nil
+ }
+ 
+-// CloseIssueWithEvents is CloseIssue plus generated claim audit events that
+-// callers must deliver after commit. The returned events are ordered by
+-// insertion id, with issue.closed first and generated claim audit events
+-// following it.
++// CloseIssueWithEvents is CloseIssue plus generated claim audit and release
++// events that callers must deliver after commit. The returned events are ordered
++// by insertion id, with issue.closed first, then audit, then lease release.
+ func (d *Store) CloseIssueWithEvents(
+ 	ctx context.Context,
+ 	issueID int64,
+@@ -1578,11 +1577,15 @@ func (d *Store) closeIssueGuarded(
+ 	if err != nil {
+ 		return db.Issue{}, nil, false, err
+ 	}
+-	lastEventID := evt.ID
+-	if len(auditEvents) > 0 {
+-		events = append(events, auditEvents...)
+-		lastEventID = auditEvents[len(auditEvents)-1].ID
++	events = append(events, auditEvents...)
++	released, err := d.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, issue, projectName, p.Actor)
++	if err != nil {
++		return db.Issue{}, nil, false, err
++	}
++	if released != nil {
++		events = append(events, *released)
+ 	}
++	lastEventID := events[len(events)-1].ID
+ 	if p.Reason == "done" && issue.RecurrenceID != nil && issue.OccurrenceKey != nil {
+ 		if _, err := d.materializeNextTx(ctx, tx, *issue.RecurrenceID,
+ 			*issue.OccurrenceKey, p.Actor); err != nil {
+-- 
+2.50.1 (Apple Git-155)
+

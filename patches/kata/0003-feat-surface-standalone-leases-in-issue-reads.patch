@@ -1,0 +1,247 @@
+From 31c2867ff9e0ab0e65ca4fb7fd137e2da5646a0c Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 09:15:58 +0800
+Subject: [PATCH 3/8] feat: surface standalone leases in issue reads
+
+---
+ internal/daemon/handlers_claims.go            |  44 +++---
+ internal/daemon/handlers_issues.go            |  14 +-
+ .../handlers_show_standalone_leases_test.go   | 126 ++++++++++++++++++
+ 3 files changed, 150 insertions(+), 34 deletions(-)
+ create mode 100644 internal/daemon/handlers_show_standalone_leases_test.go
+
+diff --git a/internal/daemon/handlers_claims.go b/internal/daemon/handlers_claims.go
+index e3dd59a..6829b89 100644
+--- a/internal/daemon/handlers_claims.go
++++ b/internal/daemon/handlers_claims.go
+@@ -816,17 +816,6 @@ func claimStatusBody(status db.ClaimStatus) api.ClaimStatusBody {
+ 
+ const showClaimStatusRetryAfter = time.Minute
+ 
+-func showIssueClaimRelevant(ctx context.Context, store db.Storage, projectID int64) (bool, error) {
+-	binding, err := store.FederationBindingByProject(ctx, projectID)
+-	if errors.Is(err, db.ErrNotFound) {
+-		return false, nil
+-	}
+-	if err != nil {
+-		return false, err
+-	}
+-	return binding.Enabled && (binding.Role == db.FederationRoleHub || binding.Role == db.FederationRoleSpoke), nil
+-}
+-
+ func refreshShowClaimStatus(ctx context.Context, cfg ServerConfig, issue db.Issue) (*time.Time, error) {
+ 	finishTransport, err := beginClaimFederationTransport(ctx, cfg, issue.ProjectID)
+ 	if err != nil {
+@@ -834,28 +823,25 @@ func refreshShowClaimStatus(ctx context.Context, cfg ServerConfig, issue db.Issu
+ 	}
+ 	defer finishTransport()
+ 
+-	binding, err := cfg.DB.FederationBindingByProject(ctx, issue.ProjectID)
+-	if errors.Is(err, db.ErrNotFound) {
+-		return nil, nil
+-	}
++	authority, binding, err := resolveIssueLeaseAuthority(ctx, cfg.DB, issue.ProjectID)
+ 	if err != nil {
+-		return nil, internalAPIError(err)
++		return nil, err
+ 	}
+-	if !binding.Enabled || binding.Role != db.FederationRoleSpoke {
+-		if binding.Enabled && binding.Role == db.FederationRoleHub {
+-			status, err := cfg.DB.ClaimStatus(ctx, issue.ProjectID, issue.UID, time.Now().UTC())
+-			if err != nil {
+-				return nil, claimAPIError(err)
+-			}
+-			cfg.Publish().EventsByProject(status.Events)
+-			hubNow := status.HubNow
+-			if hubNow.IsZero() {
+-				return nil, nil
+-			}
+-			return &hubNow, nil
+-		}
++	if authority == leaseAuthorityDisabled {
+ 		return nil, nil
+ 	}
++	if authority == leaseAuthorityStandalone || authority == leaseAuthorityHub {
++		status, err := cfg.DB.ClaimStatus(ctx, issue.ProjectID, issue.UID, time.Now().UTC())
++		if err != nil {
++			return nil, claimAPIError(err)
++		}
++		cfg.Publish().EventsByProject(status.Events)
++		hubNow := status.HubNow
++		if hubNow.IsZero() {
++			return nil, nil
++		}
++		return &hubNow, nil
++	}
+ 	now := time.Now().UTC()
+ 	if skip, err := skipRecentShowClaimStatusError(ctx, cfg.DB, issue, now); err != nil {
+ 		return nil, internalAPIError(err)
+diff --git a/internal/daemon/handlers_issues.go b/internal/daemon/handlers_issues.go
+index fa135d1..0fe631b 100644
+--- a/internal/daemon/handlers_issues.go
++++ b/internal/daemon/handlers_issues.go
+@@ -868,11 +868,11 @@ func hydrateShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Is
+ 	out.Body.Labels = labels
+ 	out.Body.Parent = parent
+ 	out.Body.Children = childOuts
+-	claimRelevant, err := showIssueClaimRelevant(ctx, cfg.DB, issue.ProjectID)
++	authority, _, err := resolveIssueLeaseAuthority(ctx, cfg.DB, issue.ProjectID)
+ 	if err != nil {
+-		return nil, internalAPIError(err)
++		return nil, err
+ 	}
+-	if !claimRelevant {
++	if authority == leaseAuthorityDisabled {
+ 		return out, nil
+ 	}
+ 	if issue.DeletedAt != nil {
+@@ -885,8 +885,12 @@ func hydrateShowIssueResponse(ctx context.Context, cfg ServerConfig, issue db.Is
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-	if err := hydrateClaimViolationsForIssue(ctx, cfg.DB, issue, out); err != nil {
+-		return nil, internalAPIError(err)
++	// Violation auditing remains federation-only; standalone leases only need
++	// local status refresh and the existing lease display fields.
++	if authority == leaseAuthorityHub || authority == leaseAuthoritySpoke {
++		if err := hydrateClaimViolationsForIssue(ctx, cfg.DB, issue, out); err != nil {
++			return nil, internalAPIError(err)
++		}
+ 	}
+ 	if err := hydrateClaimOutForIssue(ctx, cfg, issue, out); err != nil {
+ 		return nil, err
+diff --git a/internal/daemon/handlers_show_standalone_leases_test.go b/internal/daemon/handlers_show_standalone_leases_test.go
+new file mode 100644
+index 0000000..a1e385c
+--- /dev/null
++++ b/internal/daemon/handlers_show_standalone_leases_test.go
+@@ -0,0 +1,126 @@
++package daemon_test
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/api"
++	"go.kenn.io/kata/internal/daemon"
++	"go.kenn.io/kata/internal/db"
++	"go.kenn.io/kata/internal/testenv"
++)
++
++func TestShowIssueStandaloneLease(t *testing.T) {
++	for _, route := range []string{"short_id", "project_uid", "global_uid"} {
++		for _, state := range []string{"hard", "timed", "expired", "none"} {
++			t.Run(route+"/"+state, func(t *testing.T) {
++				env := testenv.New(t)
++				project, issue := createStandaloneClaimIssue(t, env)
++				var acquired *db.IssueClaim
++				if state != "none" {
++					kind := state
++					acquiredAt := time.Now().UTC()
++					if state == "expired" {
++						kind = "timed"
++						acquiredAt = acquiredAt.Add(-2 * time.Minute)
++					}
++					result, err := env.DB.AcquireClaim(context.Background(), db.AcquireClaimParams{
++						ProjectID: project.ID,
++						IssueRef:  issue.ShortID,
++						Principal: db.ClaimPrincipal{
++							HolderInstanceUID: env.DB.InstanceUID(),
++							Holder:            "local-agent",
++							ClientKind:        "cli",
++						},
++						ClaimKind: kind,
++						TTL:       time.Minute,
++						Now:       acquiredAt,
++					})
++					require.NoError(t, err)
++					require.True(t, result.Granted)
++					require.NotNil(t, result.Claim)
++					acquired = result.Claim
++					assertShowLiveClaimCount(t, env.DB, issue.UID, 1)
++				}
++				assertShowEventCount(t, env.DB, "claim.expired", 0)
++				sub := env.Broadcaster.Subscribe(daemon.SubFilter{ProjectID: project.ID})
++				defer sub.Unsub()
++
++				path := issuePathRef(project.ID, issue.ShortID, "")
++				switch route {
++				case "project_uid":
++					path = issuePathRef(project.ID, issue.UID, "")
++				case "global_uid":
++					path = "/api/v1/issues/" + issue.UID
++				}
++				beforeShow := time.Now().UTC()
++				resp, raw := envDoRaw(t, env, http.MethodGet, path, nil, nil)
++				afterShow := time.Now().UTC()
++				require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
++				var body struct {
++					Issue       db.Issue           `json:"issue"`
++					Lease       *api.IssueClaimOut `json:"lease"`
++					LeaseHubNow *time.Time         `json:"lease_hub_now"`
++				}
++				require.NoError(t, json.Unmarshal(raw, &body))
++				assert.Equal(t, issue.UID, body.Issue.UID)
++				var fields map[string]json.RawMessage
++				require.NoError(t, json.Unmarshal(raw, &fields))
++				for _, field := range []string{
++					"pending_leases", "pending_claims", "lease_violations", "claim_violations",
++					"lease_violation_count", "claim_violation_count",
++				} {
++					assert.NotContains(t, fields, field)
++				}
++
++				if state == "hard" || state == "timed" {
++					require.NotNil(t, body.Lease, "standalone live lease must appear in show")
++					assert.Equal(t, acquired.ClaimUID, body.Lease.ClaimUID)
++					assert.Equal(t, issue.UID, body.Lease.IssueUID)
++					assert.Equal(t, project.ID, body.Lease.ProjectID)
++					assert.Equal(t, "local-agent", body.Lease.Holder)
++					assert.Equal(t, env.DB.InstanceUID(), body.Lease.HolderInstanceUID)
++					assert.Equal(t, state, body.Lease.ClaimKind)
++					assert.Nil(t, body.Lease.ReleasedAt)
++					require.NotNil(t, body.LeaseHubNow)
++					assert.WithinRange(t, *body.LeaseHubNow, beforeShow, afterShow)
++					if state == "timed" {
++						require.NotNil(t, body.Lease.ExpiresAt)
++						assert.True(t, body.Lease.ExpiresAt.After(*body.LeaseHubNow))
++					} else {
++						assert.Nil(t, body.Lease.ExpiresAt)
++					}
++					assert.JSONEq(t, string(fields["lease"]), string(fields["claim"]))
++					assert.JSONEq(t, string(fields["lease_hub_now"]), string(fields["claim_hub_now"]))
++					assertShowLiveClaimCount(t, env.DB, issue.UID, 1)
++					assertShowEventCount(t, env.DB, "claim.expired", 0)
++					return
++				}
++
++				assert.Nil(t, body.Lease)
++				assert.Nil(t, body.LeaseHubNow)
++				for _, field := range []string{"lease", "claim", "lease_hub_now", "claim_hub_now"} {
++					assert.NotContains(t, fields, field)
++				}
++				assertShowLiveClaimCount(t, env.DB, issue.UID, 0)
++				if state == "expired" {
++					assertShowEventCount(t, env.DB, "claim.expired", 1)
++					msg := receiveMsg(t, sub.Ch, time.Second, "standalone show should broadcast committed lease expiry")
++					require.NotNil(t, msg.Event)
++					assert.Equal(t, "claim.expired", msg.Event.Type)
++					assert.Equal(t, project.ID, msg.Event.ProjectID)
++					resp, raw = envDoRaw(t, env, http.MethodGet, path, nil, nil)
++					require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
++					assertShowEventCount(t, env.DB, "claim.expired", 1)
++				} else {
++					assertShowEventCount(t, env.DB, "claim.expired", 0)
++				}
++			})
++		}
++	}
++}
+-- 
+2.50.1 (Apple Git-155)
+

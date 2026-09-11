@@ -1,0 +1,176 @@
+From 304d2c4838f5d2d47f1187ec24b12e6005268d86 Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 10:01:59 +0800
+Subject: [PATCH 7/8] fix: preserve close-v2 receipt replay and tenure
+ isolation
+
+---
+ docs/reference/http-api.md                    |  9 ++
+ internal/daemon/handlers_actions.go           | 27 ++++--
+ .../daemon/handlers_close_lease_retry_test.go | 82 +++++++++++++++++++
+ 3 files changed, 112 insertions(+), 6 deletions(-)
+ create mode 100644 internal/daemon/handlers_close_lease_retry_test.go
+
+diff --git a/docs/reference/http-api.md b/docs/reference/http-api.md
+index e5b6c5e..2fc7648 100644
+--- a/docs/reference/http-api.md
++++ b/docs/reference/http-api.md
+@@ -123,6 +123,15 @@ and wrong-holder leases return `409 claim_required`, `claim_expired`, `claim_los
+ and `claim_denied`, respectively. Strict dry-run is explicitly unsupported: it
+ cannot claim to validate a future atomic close.
+ 
++For a retryable close, also send a stable `Idempotency-Key`. The receipt is
++looked up before checking a live lease, so an exact retry recovers the original
++close event even after its lease was released. The close-v2 fingerprint includes
++protocol, expected ClaimUID, client kind, and all legacy request inputs. Reusing
++a key with another tenure or downgrading to close-v1 returns
++`409 idempotency_mismatch`. Existing close-v1 receipt fingerprints are unchanged.
++An exact old receipt replay never closes a reopened issue or releases a new
++lease: it returns the original event and the current issue projection.
++
+ The field is **optional in the schema** even though current daemons always send
+ it. That is deliberate: a version-detection field has to survive version skew,
+ so a client generated from a schema that includes it can still parse the
+diff --git a/internal/daemon/handlers_actions.go b/internal/daemon/handlers_actions.go
+index 940fd90..f9a8ef3 100644
+--- a/internal/daemon/handlers_actions.go
++++ b/internal/daemon/handlers_actions.go
+@@ -88,9 +88,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 				return nil, err
+ 			}
+ 			if match != nil {
+-				idempotencyFingerprint = closeIdempotencyFingerprint(
+-					match.IssueUID, in.Ref, actor, in.Body.Reason, in.Body.Message, in.Body.Source,
+-					in.Body.Evidence, in.Body.DryRun, ifMatchRev)
++				idempotencyFingerprint = closeRequestIdempotencyFingerprint(match.IssueUID, actor, in, ifMatchRev)
+ 				return closeIdempotencyResponse(ctx, cfg, match, idempotencyFingerprint)
+ 			}
+ 		}
+@@ -99,9 +97,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 			return nil, err
+ 		}
+ 		if in.IdempotencyKey != "" {
+-			idempotencyFingerprint = closeIdempotencyFingerprint(
+-				issue.UID, in.Ref, actor, in.Body.Reason, in.Body.Message, in.Body.Source,
+-				in.Body.Evidence, in.Body.DryRun, ifMatchRev)
++			idempotencyFingerprint = closeRequestIdempotencyFingerprint(issue.UID, actor, in, ifMatchRev)
+ 		}
+ 		if ifMatchRev != nil && issue.Revision != *ifMatchRev {
+ 			return nil, api.NewError(412, "revision_conflict",
+@@ -400,6 +396,25 @@ func closeIdempotencyResponse(
+ 	return out, nil
+ }
+ 
++// closeRequestIdempotencyFingerprint preserves the exact close-v1 hash while
++// domain-separating close-v2 receipts by protocol and execution tenure. Receipt
++// lookup stays before live-lease validation, including after ambiguous commits.
++func closeRequestIdempotencyFingerprint(issueUID, actor string, in *api.CloseActionRequest, revision *int64) string {
++	legacy := closeIdempotencyFingerprint(issueUID, in.Ref, actor, in.Body.Reason,
++		in.Body.Message, in.Body.Source, in.Body.Evidence, in.Body.DryRun, revision)
++	if in.Body.RetryProtocol != api.CloseLeaseProtocol {
++		return legacy
++	}
++	encoded, _ := json.Marshal(struct {
++		Protocol           string `json:"protocol"`
++		RequestFingerprint string `json:"request_fingerprint"`
++		ExpectedClaimUID   string `json:"expected_claim_uid"`
++		ClientKind         string `json:"client_kind"`
++	}{in.Body.RetryProtocol, legacy, in.IfLeaseMatch, in.Body.ClientKind})
++	sum := sha256.Sum256(encoded)
++	return hex.EncodeToString(sum[:])
++}
++
+ func closeIdempotencyFingerprint(
+ 	issueUID, requestRef, actor, reason, message, source string,
+ 	evidence []api.Evidence,
+diff --git a/internal/daemon/handlers_close_lease_retry_test.go b/internal/daemon/handlers_close_lease_retry_test.go
+new file mode 100644
+index 0000000..f94f10c
+--- /dev/null
++++ b/internal/daemon/handlers_close_lease_retry_test.go
+@@ -0,0 +1,82 @@
++package daemon_test
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/api"
++	"go.kenn.io/kata/internal/daemon"
++	"go.kenn.io/kata/internal/db"
++)
++
++func TestCloseV2ReceiptReplayAndTenureIsolation(t *testing.T) {
++	for _, failure := range []string{"response-lost", "commit-ambiguous", "receipt-read-fails"} {
++		t.Run(failure, func(t *testing.T) {
++			database := openTestDB(t)
++			ctx := context.Background()
++			project, err := database.db.CreateProject(ctx, "retry-project")
++			require.NoError(t, err)
++			issue, _, err := database.db.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "strict retry", Author: "agent-a"})
++			require.NoError(t, err)
++			claim, err := database.db.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, ClaimKind: "hard", Principal: db.ClaimPrincipal{HolderInstanceUID: database.db.InstanceUID(), Holder: "agent-a", ClientKind: "cli"}})
++			require.NoError(t, err)
++			store := &lostCloseResponseStore{Storage: database.db, failNext: failure != "response-lost", failIssueReadOnce: failure == "receipt-read-fails"}
++			sink := &recordingSink{}
++			ts := startTestServer(t, daemon.ServerConfig{DB: store, StartedAt: database.now, Hooks: sink})
++			path := issueURLRef(project.ID, issue.UID, "actions/close")
++			headers := map[string]string{"Idempotency-Key": "logical-close-attempt", "If-Lease-Match": claim.Claim.ClaimUID}
++			body := strictCloseBody()
++			first := postWithHeader(t, ts, path, headers, body)
++			if failure == "receipt-read-fails" {
++				assertAPIError(t, first.status, first.body, http.StatusInternalServerError, "internal")
++			} else {
++				requireOK(t, first)
++			}
++			status, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			assert.False(t, status.Held)
++			committed := sink.snapshot()
++			require.Len(t, committed, 2)
++			assert.Equal(t, "issue.closed", committed[0].Type)
++			assert.Equal(t, "claim.released", committed[1].Type)
++
++			// The retry must restore the receipt even though its lease no longer exists.
++			retry := postWithHeader(t, ts, path, headers, body)
++			requireOK(t, retry)
++			var out api.MutationResponse
++			require.NoError(t, json.Unmarshal(retry.body, &out.Body))
++			assert.True(t, out.Body.Reused)
++			require.NotNil(t, out.Body.OriginalEvent)
++			assert.Equal(t, committed[0].UID, out.Body.OriginalEvent.UID)
++			assert.Equal(t, committed, sink.snapshot(), "never publish receipt replay twice")
++
++			// Restore an open issue/new tenure to demonstrate an old receipt cannot
++			// close new work and that changing tenure/protocol cannot reuse its key.
++			_, _, _, err = database.db.ReopenIssue(ctx, issue.ID, "supervisor")
++			require.NoError(t, err)
++			replacement, err := database.db.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, ClaimKind: "hard", Principal: db.ClaimPrincipal{HolderInstanceUID: database.db.InstanceUID(), Holder: "agent-a", ClientKind: "cli"}})
++			require.NoError(t, err)
++			require.NotEqual(t, claim.Claim.ClaimUID, replacement.Claim.ClaimUID)
++			requireOK(t, postWithHeader(t, ts, path, headers, body))
++			headers["If-Lease-Match"] = replacement.Claim.ClaimUID
++			mismatch := postWithHeader(t, ts, path, headers, body)
++			assertAPIError(t, mismatch.status, mismatch.body, http.StatusConflict, "idempotency_mismatch")
++			delete(headers, "If-Lease-Match")
++			body["retry_protocol"] = "close-v1"
++			mismatch = postWithHeader(t, ts, path, headers, body)
++			assertAPIError(t, mismatch.status, mismatch.body, http.StatusConflict, "idempotency_mismatch")
++			current, err := database.db.IssueByID(ctx, issue.ID)
++			require.NoError(t, err)
++			assert.Equal(t, "open", current.Status)
++			status, err = database.db.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			require.NotNil(t, status.Claim)
++			assert.Equal(t, replacement.Claim.ClaimUID, status.Claim.ClaimUID)
++		})
++	}
++}
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,125 @@
+From b67a69678c69b00594dde45c2ffd4c2539a35b6b Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 10:22:07 +0800
+Subject: [PATCH] fix: audit strict close by execution principal not display
+ actor
+
+---
+ internal/db/dbtest/conformance_claim_guard.go |  8 ++++++--
+ internal/db/pgstore/claims_core.go            | 17 ++++-------------
+ internal/db/pgstore/issue_lifecycle.go        |  2 +-
+ internal/db/sqlitestore/claims.go             |  7 +++++++
+ internal/db/sqlitestore/queries.go            |  1 +
+ 5 files changed, 19 insertions(+), 16 deletions(-)
+
+diff --git a/internal/db/dbtest/conformance_claim_guard.go b/internal/db/dbtest/conformance_claim_guard.go
+index a79b352..ca0cbd5 100644
+--- a/internal/db/dbtest/conformance_claim_guard.go
++++ b/internal/db/dbtest/conformance_claim_guard.go
+@@ -19,7 +19,7 @@ import (
+ func checkClaimGuardClose(t *testing.T, store db.Storage) error {
+ 	ctx := context.Background()
+ 	for _, role := range []string{"standalone", "hub"} {
+-		for _, name := range []string{"required", "expired", "wrong-uid", "holder", "instance", "client-kind", "hard", "timed", "nil", "optional"} {
++		for _, name := range []string{"required", "expired", "wrong-uid", "holder", "instance", "client-kind", "hard", "timed", "display-actor", "nil", "optional"} {
+ 			t.Run(role+"/"+name, func(t *testing.T) {
+ 				project, err := store.CreateProject(ctx, "guard-"+role+"-"+name)
+ 				require.NoError(t, err)
+@@ -71,7 +71,11 @@ func checkClaimGuardClose(t *testing.T, store db.Storage) error {
+ 				require.NoError(t, err)
+ 				cursor, err := store.MaxEventID(ctx)
+ 				require.NoError(t, err)
+-				closed, events, changed, err := store.CloseIssueGuarded(ctx, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: guard})
++				actor := "worker"
++				if name == "display-actor" {
++					actor = "Human-readable worker"
++				}
++				closed, events, changed, err := store.CloseIssueGuarded(ctx, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: actor, ClaimGuard: guard})
+ 				if want != nil {
+ 					require.ErrorIs(t, err, want)
+ 					assert.False(t, changed)
+diff --git a/internal/db/pgstore/claims_core.go b/internal/db/pgstore/claims_core.go
+index ba588e4..4bad391 100644
+--- a/internal/db/pgstore/claims_core.go
++++ b/internal/db/pgstore/claims_core.go
+@@ -407,23 +407,14 @@ func guardedCloseClaimTx(ctx context.Context, tx *sql.Tx, issue db.Issue, guard
+ // annotateGuardedClaimCloseTx retains the hub audit using the guard's locked
+ // tenure and decision clock. The legacy annotator intentionally keeps its own
+ // wall clock for unguarded callers.
+-func (s *Store) annotateGuardedClaimCloseTx(ctx context.Context, tx *sql.Tx, input claimWorkMutationInput, claim db.IssueClaim, now time.Time) ([]db.Event, error) {
++func (s *Store) annotateGuardedClaimCloseTx(ctx context.Context, tx *sql.Tx, input claimWorkMutationInput, now time.Time) ([]db.Event, error) {
+ 	hub, err := enabledHubFederationBindingTx(ctx, tx, input.Project.ID)
+ 	if err != nil || !hub {
+ 		return nil, err
+ 	}
+-	events, err := s.expireTimedClaimsTx(ctx, tx, input.Project.ID, now, 0)
+-	if err != nil {
+-		return nil, err
+-	}
+-	if !claimWorkCoveredByLiveClaim(claim, input.HolderInstanceUID, input.Actor) {
+-		violation, err := s.insertClaimViolationEventTx(ctx, tx, input, claim)
+-		if err != nil {
+-			return nil, err
+-		}
+-		events = append(events, violation)
+-	}
+-	return events, nil
++	// Exact principal coverage was established by the strict guard. Do not
++	// compare its opaque holder identity with the human-readable event actor.
++	return s.expireTimedClaimsTx(ctx, tx, input.Project.ID, now, 0)
+ }
+ 
+ func claimForIssueTx(ctx context.Context, queryer claimQueryer, issueUID string, lock bool) (db.IssueClaim, error) {
+diff --git a/internal/db/pgstore/issue_lifecycle.go b/internal/db/pgstore/issue_lifecycle.go
+index 5b1bb47..dfeafbd 100644
+--- a/internal/db/pgstore/issue_lifecycle.go
++++ b/internal/db/pgstore/issue_lifecycle.go
+@@ -382,7 +382,7 @@ func (s *Store) closeIssueWithEvents(
+ 			auditEvents, err := s.annotateGuardedClaimCloseTx(ctx, tx, claimWorkMutationInput{
+ 				Project: project, Issue: current, EventType: "issue.closed", Actor: p.Actor,
+ 				HolderInstanceUID: s.InstanceUID(), OffendingEventUID: created.UID,
+-			}, *guardedClaim, claimDecisionTime)
++			}, claimDecisionTime)
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/internal/db/sqlitestore/claims.go b/internal/db/sqlitestore/claims.go
+index a3b8a9e..f27bbaa 100644
+--- a/internal/db/sqlitestore/claims.go
++++ b/internal/db/sqlitestore/claims.go
+@@ -1159,6 +1159,7 @@ func (d *Store) releaseLiveAuthoritativeClaimOnCloseTx(
+ type claimWorkMutationInput struct {
+ 	// Now is the optional decision clock shared by a strict close's guard and release.
+ 	Now               time.Time
++	GuardedClose      bool // exact tenure/principal coverage already established
+ 	ProjectID         int64
+ 	ProjectName       string
+ 	IssueID           int64
+@@ -1310,6 +1311,12 @@ func (d *Store) annotateClaimWorkMutationTx(
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// Strict close has already checked the complete lease principal. A host's
++	// display actor is not its opaque execution identity and must not turn a
++	// proven holder's close into a spurious federation violation.
++	if in.GuardedClose {
++		return events, nil
++	}
+ 	if in.OffendingEventUID == "" {
+ 		uid, err := latestClaimOffendingEventUIDTx(ctx, tx, in.ProjectID, in.IssueUID, in.EventType, in.Actor)
+ 		if err != nil && !errors.Is(err, db.ErrNotFound) {
+diff --git a/internal/db/sqlitestore/queries.go b/internal/db/sqlitestore/queries.go
+index 42befdf..36aea72 100644
+--- a/internal/db/sqlitestore/queries.go
++++ b/internal/db/sqlitestore/queries.go
+@@ -1594,6 +1594,7 @@ func (d *Store) closeIssueGuarded(
+ 		Actor:             p.Actor,
+ 		HolderInstanceUID: d.InstanceUID(),
+ 		Now:               claimDecisionTime,
++		GuardedClose:      guardedClaim != nil,
+ 	})
+ 	if err != nil {
+ 		return db.Issue{}, nil, false, err
+-- 
+2.50.1 (Apple Git-155)
+

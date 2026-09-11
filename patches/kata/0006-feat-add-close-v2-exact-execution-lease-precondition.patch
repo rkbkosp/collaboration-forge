@@ -1,0 +1,1434 @@
+From 981d39421411a893b0d37453261a53033d749fc3 Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 09:57:31 +0800
+Subject: [PATCH 6/8] feat: add close-v2 exact execution lease precondition
+
+---
+ api/openapi.yaml                              |  13 +-
+ docs/reference/http-api.md                    |  28 +-
+ internal/api/types.go                         |  11 +-
+ internal/daemon/handlers_actions.go           |  38 +-
+ internal/daemon/handlers_close_lease_test.go  |  95 +++++
+ internal/daemon/openapi.go                    |   2 +-
+ internal/db/claim_guard.go                    |  37 ++
+ internal/db/dbtest/conformance.go             |  37 ++
+ internal/db/dbtest/conformance_claim_guard.go | 389 ++++++++++++++++++
+ internal/db/errors.go                         |   2 +
+ internal/db/params.go                         |   5 +-
+ internal/db/pgstore/claims_core.go            |  48 +++
+ internal/db/pgstore/conformance_test.go       |  19 +
+ internal/db/pgstore/issue_lifecycle.go        |  62 ++-
+ internal/db/sqlitestore/claims.go             |  30 +-
+ internal/db/sqlitestore/conformance_test.go   |  29 ++
+ internal/db/sqlitestore/queries.go            |  47 ++-
+ pkg/client/generated/enums.go                 |   3 +-
+ pkg/client/generated/headers.go               |   2 +
+ pkg/client/generated/types.go                 |   1 +
+ pkg/client/openapi.yaml                       |  13 +-
+ service_close_lease_test.go                   |  58 +++
+ 22 files changed, 932 insertions(+), 37 deletions(-)
+ create mode 100644 internal/daemon/handlers_close_lease_test.go
+ create mode 100644 internal/db/claim_guard.go
+ create mode 100644 internal/db/dbtest/conformance_claim_guard.go
+ create mode 100644 service_close_lease_test.go
+
+diff --git a/api/openapi.yaml b/api/openapi.yaml
+index 18d05b4..0b6a0dc 100644
+--- a/api/openapi.yaml
++++ b/api/openapi.yaml
+@@ -297,6 +297,8 @@ components:
+       properties:
+         actor:
+           type: string
++        client_kind:
++          type: string
+         dry_run:
+           type: boolean
+         evidence:
+@@ -317,6 +319,7 @@ components:
+         retry_protocol:
+           enum:
+             - close-v1
++            - close-v2
+             - ""
+           type: string
+         source:
+@@ -4438,7 +4441,7 @@ components:
+       type: object
+ info:
+   title: kata
+-  version: 0.17.0
++  version: 0.18.0
+ openapi: 3.1.0
+ paths:
+   /api/v1/audit/closes:
+@@ -6151,6 +6154,14 @@ paths:
+           name: If-Match
+           schema:
+             type: string
++        - in: header
++          name: If-Lease-Match
++          schema:
++            type: string
++        - in: header
++          name: Authorization
++          schema:
++            type: string
+       requestBody:
+         content:
+           application/json:
+diff --git a/docs/reference/http-api.md b/docs/reference/http-api.md
+index 5baf1c0..e5b6c5e 100644
+--- a/docs/reference/http-api.md
++++ b/docs/reference/http-api.md
+@@ -97,8 +97,31 @@ always send the pinned-target fields and its close-audit paging relies on
+ 
+ Guarded close requests use a request-local compatibility check instead of a
+ separate health probe. A request that sends `Idempotency-Key` or `If-Match`
+-also sends `retry_protocol: "close-v1"`. Current daemons require the marker;
+-older daemons reject the unknown field before the close can run.
++also sends `retry_protocol: "close-v1"` (or `close-v2` with a lease precondition).
++Current daemons require the marker; older daemons reject an unknown field or
++protocol enum before the close can run.
++
++### Exact execution lease close
++
++Send `retry_protocol: "close-v2"` and `If-Lease-Match: <claim_uid>` together.
++The header is mandatory for close-v2; sending it with another protocol returns
++`400 protocol_required`. A close-v1 daemon rejects the unknown close-v2 enum,
++so a strict client cannot silently fall back to an unguarded close. Health or
++capability discovery is not this safety boundary.
++
++The storage close transaction checks local authority, the exact ClaimUID,
++expiry, and the acquire principal's complete holder/instance/client-kind tuple,
++then closes and releases that lease atomically. Standalone and enabled hubs are
++authoritative; spoke cache is not. Without a guard, legacy close behavior is
++unchanged. `If-Match` remains an independent revision precondition.
++
++Caller-authenticated clients use the same actor/holder and optional `client_kind`
++as acquire. Embedding hosts instead derive the principal from their authenticated
++subject using the same resolver as acquire/renew/release; body actor/holder
++strings cannot impersonate an execution. Missing, expired, mismatched tenure,
++and wrong-holder leases return `409 claim_required`, `claim_expired`, `claim_lost`,
++and `claim_denied`, respectively. Strict dry-run is explicitly unsupported: it
++cannot claim to validate a future atomic close.
+ 
+ The field is **optional in the schema** even though current daemons always send
+ it. That is deliberate: a version-detection field has to survive version skew,
+@@ -118,6 +141,7 @@ use the exact request field names, and accept empty response collections as
+ 
+ | Version | Change |
+ | --- | --- |
++| `0.18.0` | Adds close-v2 and the exact If-Lease-Match execution lease precondition, with atomic principal/liveness validation and close-time release. |
+ | `0.17.0` | Create issue, edit issue, create comment, and add label accept a numeric project ID or `name:<project>` in the project path. Optional alias headers use alias-first resolution. Successful responses include `X-Kata-Project-Name`. Generated clients represent these four path parameters as strings. |
+ | `0.16.0` | Ordinary API array fields are non-null. Empty and nil Go slices serialize as `[]`, generated clients omit `null` from ordinary array types, and requests reject `null` for those arrays. JSON object member names are case-sensitive. |
+ | `0.15.0` | Added close idempotency and revision headers, the `close-v1` request marker, and retry receipt fields. |
+diff --git a/internal/api/types.go b/internal/api/types.go
+index cfcae05..8c1cbb0 100644
+--- a/internal/api/types.go
++++ b/internal/api/types.go
+@@ -12,6 +12,10 @@ import (
+ // understood by the receiving daemon before it may mutate an issue.
+ const CloseRetryProtocol = "close-v1"
+ 
++// CloseLeaseProtocol adds exact execution lease preconditions to close-v1.
++// Older daemons reject this marker instead of silently ignoring the header.
++const CloseLeaseProtocol = "close-v2"
++
+ // PingResponse mirrors the cheapest liveness response.
+ type PingResponse struct {
+ 	Body struct {
+@@ -868,6 +872,8 @@ type CloseActionRequest struct {
+ 	Ref            string `path:"ref" required:"true"`
+ 	IdempotencyKey string `header:"Idempotency-Key"`
+ 	IfMatch        string `header:"If-Match"`
++	IfLeaseMatch   string `header:"If-Lease-Match"`
++	Authorization  string `header:"Authorization"`
+ 	Body           CloseActionRequestBody
+ }
+ 
+@@ -876,7 +882,10 @@ type CloseActionRequest struct {
+ // ignore retry headers and mutate an issue.
+ type CloseActionRequestBody struct {
+ 	ActionRequestBody
+-	RetryProtocol string `json:"retry_protocol,omitempty" enum:"close-v1,"`
++	RetryProtocol string `json:"retry_protocol,omitempty" enum:"close-v1,close-v2,"`
++	// ClientKind matches the acquire request for caller-authenticated leases.
++	// Embedding hosts derive it from the authenticated subject instead.
++	ClientKind string `json:"client_kind,omitempty"`
+ }
+ 
+ // ActionRequestBody is the shared JSON body for close and reopen actions.
+diff --git a/internal/daemon/handlers_actions.go b/internal/daemon/handlers_actions.go
+index 6d580ce..940fd90 100644
+--- a/internal/daemon/handlers_actions.go
++++ b/internal/daemon/handlers_actions.go
+@@ -25,8 +25,18 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 		Method:      "POST",
+ 		Path:        "/api/v1/projects/{project_id}/issues/{ref}/actions/close",
+ 	}, func(ctx context.Context, in *api.CloseActionRequest) (*api.MutationResponse, error) {
++		strictLease := in.Body.RetryProtocol == api.CloseLeaseProtocol
++		if in.IfLeaseMatch != "" && !strictLease {
++			return nil, api.NewError(400, "protocol_required", "If-Lease-Match requires retry_protocol close-v2", "", nil)
++		}
++		if strictLease && in.IfLeaseMatch == "" {
++			return nil, api.NewError(400, "lease_precondition_required", "close-v2 requires If-Lease-Match", "", nil)
++		}
++		if strictLease && in.Body.DryRun {
++			return nil, api.NewError(400, "dry_run_not_supported", "close-v2 requires an atomic close, not a read-side dry run", "", nil)
++		}
+ 		if (in.IdempotencyKey != "" || in.IfMatch != "") &&
+-			in.Body.RetryProtocol != api.CloseRetryProtocol {
++			in.Body.RetryProtocol != api.CloseRetryProtocol && !strictLease {
+ 			return nil, api.NewError(400, "retry_protocol_required",
+ 				"retry_protocol close-v1 is required with close retry headers", "", nil)
+ 		}
+@@ -104,7 +114,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 		// happens to omit fields the validator requires, when a child
+ 		// has landed since the original close, or when the throttle
+ 		// window is hot. Validation only gates real state transitions.
+-		if issue.Status == "closed" {
++		if issue.Status == "closed" && !strictLease {
+ 			if in.IdempotencyKey != "" {
+ 				return nil, api.NewError(409, "issue_already_closed",
+ 					"issue was already closed by another request",
+@@ -114,7 +124,20 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 			out.Body.Issue = issue
+ 			return out, nil
+ 		}
+-		if err := requireFederatedIssueClaim(ctx, cfg, in.ProjectID, issue, actor); err != nil {
++		var claimGuard *db.ClaimGuard
++		if strictLease {
++			// Use exactly the same authenticated-principal resolver as acquire,
++			// renew and release. In particular, never rebuild host holder hashes
++			// from a display actor here. Enrollment-only tokens cannot close.
++			var principal claimPrincipal
++			ctx, principal, err = resolveClaimPrincipal(ctx, cfg, in.ProjectID, in.Authorization,
++				api.ClaimActionBody{Holder: actor, ClientKind: in.Body.ClientKind},
++				HostFederationOperation{ID: "closeIssue", Mutation: true}, false)
++			if err != nil {
++				return nil, err
++			}
++			claimGuard = &db.ClaimGuard{Required: true, ExpectedClaimUID: in.IfLeaseMatch, Principal: principal.ClaimPrincipal}
++		} else if err := requireFederatedIssueClaim(ctx, cfg, in.ProjectID, issue, actor); err != nil {
+ 			return nil, err
+ 		}
+ 		if !tuiBypass {
+@@ -189,6 +212,7 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 				Reason: in.Body.Reason, Actor: actor,
+ 				Message: in.Body.Message, Evidence: dbEvidence, IfMatchRev: ifMatchRev,
+ 				IdempotencyKey: in.IdempotencyKey, IdempotencyFingerprint: idempotencyFingerprint,
++				ClaimGuard: claimGuard,
+ 			})
+ 			if len(events) > 0 {
+ 				evt = &events[0]
+@@ -216,6 +240,14 @@ func registerActionsHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 					return closeIdempotencyResponse(ctx, cfg, match, idempotencyFingerprint)
+ 				}
+ 			}
++			if errors.Is(err, db.ErrClaimLost) {
++				return nil, api.NewError(409, "claim_lost", "execution lease tenure no longer matches", "", nil)
++			}
++			if errors.Is(err, db.ErrClaimRequired) || errors.Is(err, db.ErrClaimExpired) ||
++				errors.Is(err, db.ErrClaimDenied) || errors.Is(err, db.ErrPendingClaimNotAuthoritative) ||
++				errors.Is(err, db.ErrClaimValidation) {
++				return nil, claimGateAPIError(err)
++			}
+ 			if revisionConflict, ok := errors.AsType[*db.RevisionConflictError](err); ok {
+ 				return nil, api.NewError(412, "revision_conflict",
+ 					fmt.Sprintf("issue revision is %d", revisionConflict.CurrentRevision), "", nil)
+diff --git a/internal/daemon/handlers_close_lease_test.go b/internal/daemon/handlers_close_lease_test.go
+new file mode 100644
+index 0000000..b953d7b
+--- /dev/null
++++ b/internal/daemon/handlers_close_lease_test.go
+@@ -0,0 +1,95 @@
++package daemon_test
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/db"
++	"go.kenn.io/kata/internal/testenv"
++)
++
++func strictCloseBody() map[string]any {
++	return map[string]any{"actor": "agent-a", "client_kind": "cli", "reason": "wontfix", "message": "Reviewed the request and recorded why the work should stop here.", "retry_protocol": "close-v2"}
++}
++
++func TestCloseV2ProtocolRequired(t *testing.T) {
++	for _, protocol := range []string{"", "close-v1", "close-v2"} {
++		name := protocol
++		if name == "" {
++			name = "missing-protocol"
++		}
++		t.Run(name, func(t *testing.T) {
++			env := testenv.New(t)
++			project, issue := createStandaloneClaimIssue(t, env)
++			body := strictCloseBody()
++			body["retry_protocol"] = protocol
++			headers := map[string]string{}
++			if protocol != "close-v2" {
++				headers["If-Lease-Match"] = "01HZNQ7VFPK1XGD8R5MABCD4EF"
++			}
++			resp, raw := envDoRaw(t, env, http.MethodPost, issuePathRef(project.ID, issue.ShortID, "actions/close"), body, headers)
++			code := "protocol_required"
++			if protocol == "close-v2" {
++				code = "lease_precondition_required"
++			}
++			assertAPIError(t, resp.StatusCode, raw, http.StatusBadRequest, code)
++			unchanged, err := env.DB.IssueByID(context.Background(), issue.ID)
++			require.NoError(t, err)
++			assert.Equal(t, "open", unchanged.Status)
++		})
++	}
++}
++
++func TestCloseV2ExactLease(t *testing.T) {
++	for _, state := range []string{"missing", "expired", "wrong-uid", "wrong-holder", "wrong-client", "valid"} {
++		t.Run(state, func(t *testing.T) {
++			env := testenv.New(t)
++			project, issue := createStandaloneClaimIssue(t, env)
++			expected := "01HZNQ7VFPK1XGD8R5MABCD4EF"
++			if state != "missing" {
++				now := time.Now()
++				if state == "expired" {
++					now = now.Add(-2 * time.Minute)
++				}
++				result, err := env.DB.AcquireClaim(context.Background(), db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: db.ClaimPrincipal{HolderInstanceUID: env.DB.InstanceUID(), Holder: "agent-a", ClientKind: "cli"}, ClaimKind: "timed", TTL: time.Minute, Now: now})
++				require.NoError(t, err)
++				require.NotNil(t, result.Claim)
++				if state != "wrong-uid" {
++					expected = result.Claim.ClaimUID
++				}
++			}
++			body := strictCloseBody()
++			if state == "wrong-holder" {
++				body["actor"] = "other-agent"
++			}
++			if state == "wrong-client" {
++				body["client_kind"] = "other-client"
++			}
++			resp, raw := envDoRaw(t, env, http.MethodPost, issuePathRef(project.ID, issue.ShortID, "actions/close"), body, map[string]string{"If-Lease-Match": expected})
++			if state != "valid" {
++				code := map[string]string{"missing": "claim_required", "expired": "claim_expired", "wrong-uid": "claim_lost", "wrong-holder": "claim_denied", "wrong-client": "claim_denied"}[state]
++				assertAPIError(t, resp.StatusCode, raw, http.StatusConflict, code)
++				unchanged, err := env.DB.IssueByID(context.Background(), issue.ID)
++				require.NoError(t, err)
++				assert.Equal(t, "open", unchanged.Status)
++				return
++			}
++			require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
++			var out struct {
++				Issue   db.Issue `json:"issue"`
++				Changed bool     `json:"changed"`
++			}
++			require.NoError(t, json.Unmarshal(raw, &out))
++			assert.True(t, out.Changed)
++			assert.Equal(t, "closed", out.Issue.Status)
++			status, err := env.DB.ClaimStatusReadOnly(context.Background(), project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			assert.False(t, status.Held)
++		})
++	}
++}
+diff --git a/internal/daemon/openapi.go b/internal/daemon/openapi.go
+index 4d01a4a..168d51a 100644
+--- a/internal/daemon/openapi.go
++++ b/internal/daemon/openapi.go
+@@ -16,7 +16,7 @@ import (
+ // (info.version). It tracks the HTTP API contract, not the build version, so
+ // the committed schema artifact stays stable across builds and is bumped
+ // deliberately when the wire contract changes.
+-const APISchemaVersion = "0.17.0"
++const APISchemaVersion = "0.18.0"
+ 
+ // OpenAPIDocument builds the daemon's complete OpenAPI model by wiring every
+ // route through NewServer with a zero ServerConfig. It binds no listener and
+diff --git a/internal/db/claim_guard.go b/internal/db/claim_guard.go
+new file mode 100644
+index 0000000..475b7f7
+--- /dev/null
++++ b/internal/db/claim_guard.go
+@@ -0,0 +1,37 @@
++package db
++
++import "time"
++
++// ClaimGuard fences close against an exact authoritative lease tenure. A nil
++// guard or Required=false preserves legacy, unconditional claim behavior.
++// Principal comparison always includes holder, instance, and client kind.
++type ClaimGuard struct {
++	Required         bool
++	ExpectedClaimUID string
++	Principal        ClaimPrincipal
++}
++
++// ValidateClaimGuard is a pure check of state already read under the close
++// transaction's locks. It never expires claims or emits events. The caller must
++// reuse now for releasing this tenure, not sample the clock after validation.
++func ValidateClaimGuard(guard *ClaimGuard, claim *IssueClaim, authoritative bool, now time.Time) error {
++	if guard == nil || !guard.Required {
++		return nil
++	}
++	if !authoritative {
++		return ErrPendingClaimNotAuthoritative
++	}
++	if claim == nil || claim.ReleasedAt != nil {
++		return ErrClaimRequired
++	}
++	if claim.ClaimKind == "timed" && claim.ExpiresAt != nil && !claim.ExpiresAt.After(now) {
++		return ErrClaimExpired
++	}
++	if claim.ClaimUID != guard.ExpectedClaimUID {
++		return ErrClaimLost
++	}
++	if !SameClaimPrincipal(*claim, guard.Principal) {
++		return ErrClaimDenied
++	}
++	return nil
++}
+diff --git a/internal/db/dbtest/conformance.go b/internal/db/dbtest/conformance.go
+index a8b1db4..28cced2 100644
+--- a/internal/db/dbtest/conformance.go
++++ b/internal/db/dbtest/conformance.go
+@@ -27,6 +27,8 @@ type Backend struct {
+ 	SeedUnsupportedFederationEvent func(context.Context, db.Storage, db.Project, string) error
+ 	BackdateCommentCreated         func(context.Context, db.Storage, int64, time.Time) error
+ 	InstallClaimReleaseFailure     func(context.Context, db.Storage) (func() error, error)
++	InvalidateClaimGuardBinding    func(context.Context, db.Storage, int64) error
++	InstallClaimCloseDelay         func(context.Context, db.Storage, time.Time) (func() error, error)
+ 	InstallEnrollmentInsertFailure func(context.Context, db.Storage) (func() error, error)
+ 	InstallEnrollmentRotationStage func(db.Storage, func(context.Context) error) func()
+ 	ExpectedFailures               map[string]error
+@@ -328,6 +330,41 @@ var storageScenarios = []scenario{
+ 		},
+ 		run: checkClaimLeaseLifecycle,
+ 	},
++	{
++		name:    "claim guard close",
++		methods: []string{"CloseIssueGuarded", "AcquireClaim", "ClaimStatusReadOnly", "EventsAfter"},
++		run:     checkClaimGuardClose,
++	},
++	{
++		name:           "claim guard authority",
++		methods:        []string{"CloseIssueGuarded", "ApplyClaimStatus", "UpsertFederationBinding"},
++		runWithBackend: checkClaimGuardAuthority,
++	},
++	{
++		name:    "claim guard order",
++		methods: []string{"CloseIssueGuarded", "AcquireClaim", "CreateIssue"},
++		run:     checkClaimGuardOrder,
++	},
++	{
++		name:    "claim guard concurrent fence",
++		methods: []string{"CloseIssueGuarded", "AcquireClaim", "ReleaseClaim"},
++		run:     checkClaimGuardConcurrentFence,
++	},
++	{
++		name:           "claim guard decision time",
++		methods:        []string{"CloseIssueGuarded", "AcquireClaim", "ClaimStatusReadOnly"},
++		runWithBackend: checkClaimGuardDecisionTime,
++	},
++	{
++		name:    "claim guard fence clock",
++		methods: []string{"CloseIssueGuarded", "AcquireClaim", "ClaimStatusReadOnly"},
++		run:     checkClaimGuardFenceClock,
++	},
++	{
++		name:           "claim guard rollback",
++		methods:        []string{"CloseIssueGuarded", "AcquireClaim", "ClaimStatusReadOnly"},
++		runWithBackend: checkClaimGuardRollback,
++	},
+ 	{
+ 		name: "claim close authority",
+ 		methods: []string{
+diff --git a/internal/db/dbtest/conformance_claim_guard.go b/internal/db/dbtest/conformance_claim_guard.go
+new file mode 100644
+index 0000000..a79b352
+--- /dev/null
++++ b/internal/db/dbtest/conformance_claim_guard.go
+@@ -0,0 +1,389 @@
++package dbtest
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/db"
++	"go.kenn.io/kata/internal/uid"
++)
++
++// Contract: close uses an authoritative, unexpired, exact tenure and holder
++// tuple in its write transaction. Rejections must not change any durable state.
++func checkClaimGuardClose(t *testing.T, store db.Storage) error {
++	ctx := context.Background()
++	for _, role := range []string{"standalone", "hub"} {
++		for _, name := range []string{"required", "expired", "wrong-uid", "holder", "instance", "client-kind", "hard", "timed", "nil", "optional"} {
++			t.Run(role+"/"+name, func(t *testing.T) {
++				project, err := store.CreateProject(ctx, "guard-"+role+"-"+name)
++				require.NoError(t, err)
++				if role == "hub" {
++					_, err = store.EnableProjectFederation(ctx, project.ID, "worker")
++					require.NoError(t, err)
++				}
++				issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "guarded work", Author: "worker"})
++				require.NoError(t, err)
++				principal := db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"}
++				guard := &db.ClaimGuard{Required: true, Principal: principal}
++				var want error
++				if name == "required" || name == "nil" || name == "optional" {
++					want = db.ErrClaimRequired
++				} else {
++					now, kind, ttl := time.Now().UTC(), "hard", time.Duration(0)
++					if name == "expired" || name == "timed" {
++						kind, ttl = "timed", time.Hour
++					}
++					if name == "expired" {
++						now = now.Add(-2 * time.Hour)
++					}
++					acquired, err := store.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: principal, ClaimKind: kind, TTL: ttl, Now: now})
++					require.NoError(t, err)
++					guard.ExpectedClaimUID = acquired.Claim.ClaimUID
++				}
++				switch name {
++				case "expired":
++					want = db.ErrClaimExpired
++				case "wrong-uid":
++					guard.ExpectedClaimUID, err = uid.New()
++					require.NoError(t, err)
++					guard.Principal.Holder = "also-wrong"
++					want = db.ErrClaimLost
++				case "holder":
++					guard.Principal.Holder, want = "other", db.ErrClaimDenied
++				case "instance":
++					guard.Principal.HolderInstanceUID, err = uid.New()
++					require.NoError(t, err)
++					want = db.ErrClaimDenied
++				case "client-kind":
++					guard.Principal.ClientKind, want = "cli", db.ErrClaimDenied
++				case "nil":
++					guard, want = nil, nil
++				case "optional":
++					guard.Required, want = false, nil
++				}
++				before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++				require.NoError(t, err)
++				cursor, err := store.MaxEventID(ctx)
++				require.NoError(t, err)
++				closed, events, changed, err := store.CloseIssueGuarded(ctx, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: guard})
++				if want != nil {
++					require.ErrorIs(t, err, want)
++					assert.False(t, changed)
++					assert.Empty(t, events)
++					assertClaimGuardUnchanged(t, store, issue, before, cursor)
++					return
++				}
++				require.NoError(t, err)
++				assert.True(t, changed)
++				assert.Equal(t, "closed", closed.Status)
++				wantTypes := []string{"issue.closed"}
++				if before.Held {
++					wantTypes = append(wantTypes, "claim.released")
++				}
++				assert.Equal(t, wantTypes, eventTypeNames(events))
++				durable, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: cursor, Limit: 100})
++				require.NoError(t, err)
++				assert.Equal(t, eventUIDs(events), eventUIDs(durable))
++				after, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++				require.NoError(t, err)
++				assert.False(t, after.Held)
++				if before.Held {
++					var payload struct {
++						ClaimUID string `json:"claim_uid"`
++						Reason   string `json:"reason"`
++					}
++					require.NoError(t, json.Unmarshal([]byte(events[len(events)-1].Payload), &payload))
++					assert.Equal(t, before.Claim.ClaimUID, payload.ClaimUID)
++					assert.Equal(t, "issue_closed", payload.Reason)
++				}
++			})
++		}
++	}
++	return nil
++}
++
++func assertClaimGuardUnchanged(t *testing.T, store db.Storage, issue db.Issue, before db.ClaimStatus, cursor int64) {
++	t.Helper()
++	ctx := context.Background()
++	after, err := store.ClaimStatusReadOnly(ctx, issue.ProjectID, issue.UID, time.Now())
++	require.NoError(t, err)
++	assert.Equal(t, before.Claim, after.Claim)
++	unchanged, err := store.IssueByID(ctx, issue.ID)
++	require.NoError(t, err)
++	assert.Equal(t, issue, unchanged)
++	events, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: cursor, Limit: 100})
++	require.NoError(t, err)
++	assert.Empty(t, events)
++}
++
++func checkClaimGuardAuthority(t *testing.T, store db.Storage, backend Backend) error {
++	ctx := context.Background()
++	for _, role := range []string{"spoke", "disabled-hub", "disabled-spoke", "invalid"} {
++		t.Run(role, func(t *testing.T) {
++			project, err := store.CreateProject(ctx, "guard-authority-"+role)
++			require.NoError(t, err)
++			issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "cached work", Author: "worker"})
++			require.NoError(t, err)
++			bindingRole := db.FederationRoleSpoke
++			if role == "disabled-hub" {
++				bindingRole = db.FederationRoleHub
++			}
++			_, err = store.UpsertFederationBinding(ctx, db.FederationBinding{ProjectID: project.ID, Role: bindingRole, HubProjectUID: project.UID, HubURL: "https://hub.example", HubProjectID: 42, Enabled: role == "spoke" || role == "invalid", PushEnabled: true, Actor: "worker"})
++			require.NoError(t, err)
++			if role == "invalid" {
++				require.NoError(t, backend.InvalidateClaimGuardBinding(ctx, store, project.ID))
++			}
++			claimUID, err := uid.New()
++			require.NoError(t, err)
++			principal := db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"}
++			claim := db.IssueClaim{ClaimUID: claimUID, IssueUID: issue.UID, Holder: principal.Holder, HolderInstanceUID: principal.HolderInstanceUID, ClientKind: principal.ClientKind, ClaimKind: "hard", AcquiredAt: time.Now().UTC(), Revision: 1}
++			require.NoError(t, store.ApplyClaimStatus(ctx, project.ID, issue.UID, db.ClaimStatus{Held: true, Claim: &claim, Holder: principal}))
++			before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			cursor, err := store.MaxEventID(ctx)
++			require.NoError(t, err)
++			_, events, changed, err := store.CloseIssueGuarded(ctx, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: &db.ClaimGuard{Required: true, ExpectedClaimUID: claimUID, Principal: principal}})
++			require.ErrorIs(t, err, db.ErrPendingClaimNotAuthoritative)
++			assert.False(t, changed)
++			assert.Empty(t, events)
++			assertClaimGuardUnchanged(t, store, issue, before, cursor)
++		})
++	}
++	return nil
++}
++
++func checkClaimGuardOrder(t *testing.T, store db.Storage) error {
++	ctx := context.Background()
++	project, err := store.CreateProject(ctx, "guard-order")
++	require.NoError(t, err)
++	issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "parent", Author: "worker"})
++	require.NoError(t, err)
++	_, _, err = store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "child", Author: "worker", Links: []db.InitialLink{{Type: "parent", ToNumber: issue.ID}}})
++	require.NoError(t, err)
++	principal := db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"}
++	p := db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: &db.ClaimGuard{Required: true, Principal: principal}}
++	staleRev := int64(-1)
++	p.IfMatchRev = &staleRev
++	_, _, _, err = store.CloseIssueGuarded(ctx, p)
++	var conflict *db.RevisionConflictError
++	require.ErrorAs(t, err, &conflict)
++	p.IfMatchRev = nil
++	_, _, _, err = store.CloseIssueGuarded(ctx, p)
++	require.ErrorIs(t, err, db.ErrClaimRequired, "guard precedes open children")
++	acquired, err := store.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: principal, ClaimKind: "hard"})
++	require.NoError(t, err)
++	p.ClaimGuard.ExpectedClaimUID = acquired.Claim.ClaimUID
++	before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++	require.NoError(t, err)
++	issue, err = store.IssueByID(ctx, issue.ID)
++	require.NoError(t, err)
++	cursor, err := store.MaxEventID(ctx)
++	require.NoError(t, err)
++	_, _, _, err = store.CloseIssueGuarded(ctx, p)
++	require.ErrorIs(t, err, db.ErrOpenChildren)
++	assertClaimGuardUnchanged(t, store, issue, before, cursor)
++	closed, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "already closed", Author: "worker"})
++	require.NoError(t, err)
++	_, _, _, err = store.CloseIssueWithEvents(ctx, closed.ID, "done", "worker", "", nil)
++	require.NoError(t, err)
++	p.IssueID = closed.ID
++	_, _, _, err = store.CloseIssueGuarded(ctx, p)
++	require.ErrorIs(t, err, db.ErrClaimRequired, "guard precedes already closed no-op")
++	return nil
++}
++
++// The close is already in flight, paused at its real transaction fence. A
++// separate transaction releases/reacquires the same principal's tenure before
++// the close resolves the issue. An out-of-transaction precheck would accept
++// the stale token. Repeat both hard and timed variants without scheduling luck.
++func checkClaimGuardConcurrentFence(t *testing.T, store db.Storage) error {
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
++	defer cancel()
++	project, err := store.CreateProject(ctx, "guard-fence")
++	require.NoError(t, err)
++	principal := db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"}
++	for n := 0; n < 6; n++ {
++		t.Run(fmt.Sprint(n), func(t *testing.T) {
++			issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "replace tenure", Author: "worker"})
++			require.NoError(t, err)
++			kind, ttl := "hard", time.Duration(0)
++			if n%2 == 1 {
++				kind, ttl = "timed", time.Hour
++			}
++			acquire := db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: principal, ClaimKind: kind, TTL: ttl}
++			first, err := store.AcquireClaim(ctx, acquire)
++			require.NoError(t, err)
++			entered, proceed := make(chan struct{}), make(chan struct{})
++			var once sync.Once
++			defer once.Do(func() { close(proceed) })
++			attempts := 0
++			fenced := db.WithTransactionFence(ctx, func(ctx context.Context, tx db.Transaction) error {
++				attempts++
++				// Freeze a real read snapshot before the concurrent replacement.
++				// Both engines must retry this snapshot, then reject the old UID.
++				var id int64
++				if err := tx.QueryRowContext(ctx, `SELECT id FROM issues WHERE id=$1`, issue.ID).Scan(&id); err != nil {
++					return err
++				}
++				select {
++				case <-entered:
++				default:
++					close(entered)
++				}
++				select {
++				case <-proceed:
++					return nil
++				case <-ctx.Done():
++					return ctx.Err()
++				}
++			})
++			type result struct {
++				events  []db.Event
++				changed bool
++				err     error
++			}
++			finished := make(chan result, 1)
++			go func() {
++				_, events, changed, err := store.CloseIssueGuarded(fenced, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: &db.ClaimGuard{Required: true, ExpectedClaimUID: first.Claim.ClaimUID, Principal: principal}})
++				finished <- result{events, changed, err}
++			}()
++			select {
++			case <-entered:
++			case <-ctx.Done():
++				t.Fatal(ctx.Err())
++			}
++			_, err = store.ReleaseClaim(ctx, db.ReleaseClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: principal})
++			require.NoError(t, err)
++			second, err := store.AcquireClaim(ctx, acquire)
++			require.NoError(t, err)
++			require.NotEqual(t, first.Claim.ClaimUID, second.Claim.ClaimUID)
++			before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			cursor, err := store.MaxEventID(ctx)
++			require.NoError(t, err)
++			once.Do(func() { close(proceed) })
++			select {
++			case result := <-finished:
++				require.ErrorIs(t, result.err, db.ErrClaimLost)
++				assert.False(t, result.changed)
++				assert.Empty(t, result.events)
++			case <-ctx.Done():
++				t.Fatal(ctx.Err())
++			}
++			assert.GreaterOrEqual(t, attempts, 2, "stale snapshot must retry the whole transaction")
++			assertClaimGuardUnchanged(t, store, issue, before, cursor)
++			_, events, changed, err := store.CloseIssueGuarded(ctx, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: &db.ClaimGuard{Required: true, ExpectedClaimUID: second.Claim.ClaimUID, Principal: principal}})
++			require.NoError(t, err)
++			assert.True(t, changed)
++			assert.Equal(t, []string{"issue.closed", "claim.released"}, eventTypeNames(events))
++		})
++	}
++	return nil
++}
++
++// A test-local trigger pauses the actual close write until the validated timed
++// lease expires. The decision timestamp must govern release too, including on
++// hubs whose legacy audit independently expires leases.
++func checkClaimGuardDecisionTime(t *testing.T, store db.Storage, backend Backend) error {
++	ctx := context.Background()
++	for _, role := range []string{"standalone", "hub"} {
++		t.Run(role, func(t *testing.T) {
++			project, err := store.CreateProject(ctx, "guard-clock-"+role)
++			require.NoError(t, err)
++			if role == "hub" {
++				_, err = store.EnableProjectFederation(ctx, project.ID, "worker")
++				require.NoError(t, err)
++			}
++			issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "lease deadline", Author: "worker"})
++			require.NoError(t, err)
++			principal := db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"}
++			expiresAt := time.Now().UTC().Add(time.Second)
++			acquired, err := store.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: principal, ClaimKind: "timed", TTL: time.Minute, Now: expiresAt.Add(-time.Minute)})
++			require.NoError(t, err)
++			remove, err := backend.InstallClaimCloseDelay(ctx, store, expiresAt)
++			require.NoError(t, err)
++			defer func() { require.NoError(t, remove()) }()
++			closed, events, changed, err := store.CloseIssueGuarded(ctx, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: &db.ClaimGuard{Required: true, ExpectedClaimUID: acquired.Claim.ClaimUID, Principal: principal}})
++			require.NoError(t, err)
++			assert.True(t, changed)
++			assert.Equal(t, "closed", closed.Status)
++			assert.False(t, time.Now().Before(expiresAt), "trigger must cross the lease deadline")
++			assert.Equal(t, []string{"issue.closed", "claim.released"}, eventTypeNames(events))
++			status, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			assert.False(t, status.Held)
++		})
++	}
++	return nil
++}
++
++// A request admitted while the lease is live must not retain an early clock
++// across its transaction fence. The lease is stale before locks are acquired.
++func checkClaimGuardFenceClock(t *testing.T, store db.Storage) error {
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	project, err := store.CreateProject(ctx, "guard-fence-clock")
++	require.NoError(t, err)
++	issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "fenced expiry", Author: "worker"})
++	require.NoError(t, err)
++	principal := db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"}
++	expiresAt := time.Now().UTC().Add(time.Second)
++	acquired, err := store.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: principal, ClaimKind: "timed", TTL: time.Minute, Now: expiresAt.Add(-time.Minute)})
++	require.NoError(t, err)
++	before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++	require.NoError(t, err)
++	cursor, err := store.MaxEventID(ctx)
++	require.NoError(t, err)
++	fenced := db.WithTransactionFence(ctx, func(ctx context.Context, _ db.Transaction) error {
++		timer := time.NewTimer(time.Until(expiresAt.Add(10 * time.Millisecond)))
++		defer timer.Stop()
++		select {
++		case <-timer.C:
++			return nil
++		case <-ctx.Done():
++			return ctx.Err()
++		}
++	})
++	_, events, changed, err := store.CloseIssueGuarded(fenced, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: &db.ClaimGuard{Required: true, ExpectedClaimUID: acquired.Claim.ClaimUID, Principal: principal}})
++	require.ErrorIs(t, err, db.ErrClaimExpired)
++	assert.False(t, changed)
++	assert.Empty(t, events)
++	assertClaimGuardUnchanged(t, store, issue, before, cursor)
++	return nil
++}
++
++func checkClaimGuardRollback(t *testing.T, store db.Storage, backend Backend) error {
++	ctx := context.Background()
++	for _, role := range []string{"standalone", "hub"} {
++		t.Run(role, func(t *testing.T) {
++			project, err := store.CreateProject(ctx, "guard-rollback-"+role)
++			require.NoError(t, err)
++			if role == "hub" {
++				_, err = store.EnableProjectFederation(ctx, project.ID, "worker")
++				require.NoError(t, err)
++			}
++			issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{ProjectID: project.ID, Title: "atomic guarded close", Author: "worker"})
++			require.NoError(t, err)
++			principal := db.ClaimPrincipal{HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent"}
++			acquired, err := store.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: principal, ClaimKind: "timed", TTL: time.Hour})
++			require.NoError(t, err)
++			before, err := store.ClaimStatusReadOnly(ctx, project.ID, issue.UID, time.Now())
++			require.NoError(t, err)
++			cursor, err := store.MaxEventID(ctx)
++			require.NoError(t, err)
++			remove, err := backend.InstallClaimReleaseFailure(ctx, store)
++			require.NoError(t, err)
++			defer func() { require.NoError(t, remove()) }()
++			_, _, _, err = store.CloseIssueGuarded(ctx, db.CloseIssueParams{IssueID: issue.ID, Reason: "done", Actor: "worker", ClaimGuard: &db.ClaimGuard{Required: true, ExpectedClaimUID: acquired.Claim.ClaimUID, Principal: principal}})
++			require.Error(t, err)
++			assertClaimGuardUnchanged(t, store, issue, before, cursor)
++		})
++	}
++	return nil
++}
+diff --git a/internal/db/errors.go b/internal/db/errors.go
+index 658f5c2..0b52b5e 100644
+--- a/internal/db/errors.go
++++ b/internal/db/errors.go
+@@ -167,6 +167,8 @@ var (
+ var (
+ 	// ErrClaimRequired reports that an issue mutation needs a live claim.
+ 	ErrClaimRequired = errors.New("claim required")
++	// ErrClaimLost reports that the expected tenure no longer owns the issue.
++	ErrClaimLost = errors.New("claim lost")
+ 	// ErrClaimDenied reports that another holder owns the relevant claim.
+ 	ErrClaimDenied = errors.New("claim denied")
+ 	// ErrClaimNotHeld reports release or renew by a non-holder.
+diff --git a/internal/db/params.go b/internal/db/params.go
+index 04f2ea6..346d8f6 100644
+--- a/internal/db/params.go
++++ b/internal/db/params.go
+@@ -83,8 +83,8 @@ type CreateIssueParams struct {
+ }
+ 
+ // CloseIssueParams carries optional retry and concurrency guards for one close.
+-// A nil IfMatchRev preserves the unconditional close behavior. Idempotency
+-// fields are written to the close event so a caller can recover its original
++// A nil IfMatchRev skips revision checking; a nil ClaimGuard preserves legacy
++// claim behavior. Idempotency fields are written to the close event so a caller can recover its original
+ // receipt after losing the response.
+ type CloseIssueParams struct {
+ 	IssueID                int64
+@@ -94,6 +94,7 @@ type CloseIssueParams struct {
+ 	Message                string
+ 	Evidence               []Evidence
+ 	IfMatchRev             *int64
++	ClaimGuard             *ClaimGuard
+ 	IdempotencyKey         string
+ 	IdempotencyFingerprint string
+ }
+diff --git a/internal/db/pgstore/claims_core.go b/internal/db/pgstore/claims_core.go
+index fa775ca..ba588e4 100644
+--- a/internal/db/pgstore/claims_core.go
++++ b/internal/db/pgstore/claims_core.go
+@@ -378,6 +378,54 @@ func resolveClaimIssueTx(
+ 	return issue, project, err
+ }
+ 
++// guardedCloseClaimTx runs after the issue lock and revision precondition. The
++// claim row lock fences expiry/cache writers as well as tenure replacement.
++// Each serializable retry obtains a fresh decision timestamp after these locks.
++func guardedCloseClaimTx(ctx context.Context, tx *sql.Tx, issue db.Issue, guard *db.ClaimGuard) (*db.IssueClaim, time.Time, error) {
++	var role, hubUID string
++	var enabled int
++	err := tx.QueryRowContext(ctx, `SELECT role, enabled, hub_project_uid FROM federation_bindings WHERE project_id=$1 FOR SHARE`, issue.ProjectID).Scan(&role, &enabled, &hubUID)
++	authoritative := errors.Is(err, sql.ErrNoRows) || (err == nil && role == string(db.FederationRoleHub) && enabled == 1 && katauid.Valid(hubUID))
++	if err != nil && !errors.Is(err, sql.ErrNoRows) {
++		return nil, time.Time{}, mapSQLError(err, nil)
++	}
++	if !authoritative {
++		return nil, time.Time{}, db.ErrPendingClaimNotAuthoritative
++	}
++	live, err := claimForIssueTx(ctx, tx, issue.UID, true)
++	if err != nil && !errors.Is(err, db.ErrNotFound) {
++		return nil, time.Time{}, err
++	}
++	var claim *db.IssueClaim
++	if err == nil {
++		claim = &live
++	}
++	now := time.Now().UTC()
++	return claim, now, db.ValidateClaimGuard(guard, claim, authoritative, now)
++}
++
++// annotateGuardedClaimCloseTx retains the hub audit using the guard's locked
++// tenure and decision clock. The legacy annotator intentionally keeps its own
++// wall clock for unguarded callers.
++func (s *Store) annotateGuardedClaimCloseTx(ctx context.Context, tx *sql.Tx, input claimWorkMutationInput, claim db.IssueClaim, now time.Time) ([]db.Event, error) {
++	hub, err := enabledHubFederationBindingTx(ctx, tx, input.Project.ID)
++	if err != nil || !hub {
++		return nil, err
++	}
++	events, err := s.expireTimedClaimsTx(ctx, tx, input.Project.ID, now, 0)
++	if err != nil {
++		return nil, err
++	}
++	if !claimWorkCoveredByLiveClaim(claim, input.HolderInstanceUID, input.Actor) {
++		violation, err := s.insertClaimViolationEventTx(ctx, tx, input, claim)
++		if err != nil {
++			return nil, err
++		}
++		events = append(events, violation)
++	}
++	return events, nil
++}
++
+ func claimForIssueTx(ctx context.Context, queryer claimQueryer, issueUID string, lock bool) (db.IssueClaim, error) {
+ 	query := claimSelect + ` WHERE issue_uid=$1 AND released_at IS NULL`
+ 	if lock {
+diff --git a/internal/db/pgstore/conformance_test.go b/internal/db/pgstore/conformance_test.go
+index fa96b41..81faebd 100644
+--- a/internal/db/pgstore/conformance_test.go
++++ b/internal/db/pgstore/conformance_test.go
+@@ -82,6 +82,25 @@ hlc_physical_ms,hlc_counter,content_hash
+ 				project.Name, "project.restored", "worker", `{}`, strings.Repeat("e", 64))
+ 			return err
+ 		},
++		InvalidateClaimGuardBinding: func(ctx context.Context, store db.Storage, projectID int64) error {
++			_, err := store.(*pgstore.Store).ExecContext(ctx, `UPDATE federation_bindings SET role='hub', hub_project_uid=$1 WHERE project_id=$2`, strings.Repeat("!", 26), projectID)
++			return err
++		},
++		InstallClaimCloseDelay: func(ctx context.Context, store db.Storage, deadline time.Time) (func() error, error) {
++			postgresStore := store.(*pgstore.Store)
++			_, err := postgresStore.ExecContext(ctx, fmt.Sprintf(`
++				CREATE FUNCTION delay_claim_close() RETURNS trigger LANGUAGE plpgsql AS $$
++				BEGIN
++					PERFORM pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM ('%s'::timestamptz - clock_timestamp()))));
++					RETURN NEW;
++				END $$;
++				CREATE TRIGGER delay_claim_close BEFORE UPDATE OF status ON issues
++				FOR EACH ROW WHEN (NEW.status='closed') EXECUTE FUNCTION delay_claim_close()`, deadline.Add(10*time.Millisecond).UTC().Format(time.RFC3339Nano)))
++			return func() error {
++				_, err := postgresStore.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS delay_claim_close ON issues; DROP FUNCTION IF EXISTS delay_claim_close()`)
++				return err
++			}, err
++		},
+ 		InstallClaimReleaseFailure: func(ctx context.Context, store db.Storage) (func() error, error) {
+ 			postgresStore := store.(*pgstore.Store)
+ 			_, err := postgresStore.ExecContext(ctx, `
+diff --git a/internal/db/pgstore/issue_lifecycle.go b/internal/db/pgstore/issue_lifecycle.go
+index 4e5d094..5b1bb47 100644
+--- a/internal/db/pgstore/issue_lifecycle.go
++++ b/internal/db/pgstore/issue_lifecycle.go
+@@ -7,6 +7,7 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"strings"
++	"time"
+ 
+ 	"go.kenn.io/kata/internal/db"
+ )
+@@ -279,8 +280,8 @@ func (s *Store) CloseIssueWithEvents(
+ 	})
+ }
+ 
+-// CloseIssueGuarded applies the close and its optional revision precondition in
+-// the same transaction, then returns every event committed by that mutation.
++// CloseIssueGuarded applies optional revision and claim preconditions in the
++// close transaction, then returns every event committed by that mutation.
+ func (s *Store) CloseIssueGuarded(
+ 	ctx context.Context, p db.CloseIssueParams,
+ ) (db.Issue, []db.Event, bool, error) {
+@@ -312,6 +313,14 @@ func (s *Store) closeIssueWithEvents(
+ 		if p.IfMatchRev != nil && current.Revision != *p.IfMatchRev {
+ 			return &db.RevisionConflictError{CurrentRevision: current.Revision}
+ 		}
++		var guardedClaim *db.IssueClaim
++		var claimDecisionTime time.Time
++		if p.ClaimGuard != nil && p.ClaimGuard.Required {
++			guardedClaim, claimDecisionTime, err = guardedCloseClaimTx(ctx, tx, current, p.ClaimGuard)
++			if err != nil {
++				return err
++			}
++		}
+ 		if current.Status == "closed" {
+ 			issue = current
+ 			return nil
+@@ -328,6 +337,9 @@ func (s *Store) closeIssueWithEvents(
+ 			return db.ErrOpenChildren
+ 		}
+ 		closedAt := mutationTimestamp()
++		if guardedClaim != nil {
++			closedAt = formatStoredTime(claimDecisionTime)
++		}
+ 		if _, err := tx.ExecContext(ctx, `UPDATE issues SET status = 'closed', closed_reason = $1,
+ 		  closed_at = $2, updated_at = $2 WHERE id = $3`, p.Reason, closedAt, current.ID); err != nil {
+ 			return mapSQLError(err, nil)
+@@ -366,20 +378,38 @@ func (s *Store) closeIssueWithEvents(
+ 			return err
+ 		}
+ 		events, changed = []db.Event{created}, true
+-		auditEvents, err := s.annotateClaimWorkMutationTx(ctx, tx, claimWorkMutationInput{
+-			Project: project, Issue: current, EventType: "issue.closed", Actor: p.Actor,
+-			HolderInstanceUID: s.InstanceUID(), OffendingEventUID: created.UID,
+-		})
+-		if err != nil {
+-			return err
+-		}
+-		events = append(events, auditEvents...)
+-		released, err := s.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, project, current, p.Actor)
+-		if err != nil {
+-			return err
+-		}
+-		if released != nil {
+-			events = append(events, *released)
++		if guardedClaim != nil {
++			auditEvents, err := s.annotateGuardedClaimCloseTx(ctx, tx, claimWorkMutationInput{
++				Project: project, Issue: current, EventType: "issue.closed", Actor: p.Actor,
++				HolderInstanceUID: s.InstanceUID(), OffendingEventUID: created.UID,
++			}, *guardedClaim, claimDecisionTime)
++			if err != nil {
++				return err
++			}
++			events = append(events, auditEvents...)
++			// Release the checked tenure using the same clock as guard and audit.
++			_, released, err := s.releaseClaimTx(ctx, tx, project, current, *guardedClaim,
++				"claim.released", p.Actor, "issue_closed", claimDecisionTime)
++			if err != nil {
++				return err
++			}
++			events = append(events, released)
++		} else {
++			auditEvents, err := s.annotateClaimWorkMutationTx(ctx, tx, claimWorkMutationInput{
++				Project: project, Issue: current, EventType: "issue.closed", Actor: p.Actor,
++				HolderInstanceUID: s.InstanceUID(), OffendingEventUID: created.UID,
++			})
++			if err != nil {
++				return err
++			}
++			events = append(events, auditEvents...)
++			released, err := s.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, project, current, p.Actor)
++			if err != nil {
++				return err
++			}
++			if released != nil {
++				events = append(events, *released)
++			}
+ 		}
+ 		lastEventID := events[len(events)-1].ID
+ 		if p.Reason == "done" && current.RecurrenceID != nil && current.OccurrenceKey != nil {
+diff --git a/internal/db/sqlitestore/claims.go b/internal/db/sqlitestore/claims.go
+index faeb106..a3b8a9e 100644
+--- a/internal/db/sqlitestore/claims.go
++++ b/internal/db/sqlitestore/claims.go
+@@ -1090,6 +1090,32 @@ func (d *Store) releaseClaimTx(
+ 	return released, evt, nil
+ }
+ 
++// guardedCloseClaimTx reads authority and the unreleased tenure only after
++// close has acquired the SQLite writer lock. No lease cleanup happens on a
++// failed guard, and the returned clock governs both validation and release.
++func guardedCloseClaimTx(ctx context.Context, tx claimStore, issue db.Issue, guard *db.ClaimGuard) (*db.IssueClaim, time.Time, error) {
++	var role, hubUID string
++	var enabled int
++	err := tx.QueryRowContext(ctx, `SELECT role, enabled, hub_project_uid FROM federation_bindings WHERE project_id=?`, issue.ProjectID).Scan(&role, &enabled, &hubUID)
++	authoritative := errors.Is(err, sql.ErrNoRows) || (err == nil && role == string(db.FederationRoleHub) && enabled == 1 && katauid.Valid(hubUID))
++	if err != nil && !errors.Is(err, sql.ErrNoRows) {
++		return nil, time.Time{}, fmt.Errorf("check close claim authority: %w", err)
++	}
++	if !authoritative {
++		return nil, time.Time{}, db.ErrPendingClaimNotAuthoritative
++	}
++	live, err := liveClaimForIssueTx(ctx, tx, issue.UID)
++	if err != nil && !errors.Is(err, db.ErrNotFound) {
++		return nil, time.Time{}, err
++	}
++	var claim *db.IssueClaim
++	if err == nil {
++		claim = &live
++	}
++	now := time.Now().UTC()
++	return claim, now, db.ValidateClaimGuard(guard, claim, authoritative, now)
++}
++
+ // releaseLiveAuthoritativeClaimOnCloseTx is close lifecycle cleanup, not a
+ // federation violation audit. No binding means local authority; only an enabled
+ // hub binding retains it. Spoke caches and disabled bindings stay untouched.
+@@ -1131,6 +1157,8 @@ func (d *Store) releaseLiveAuthoritativeClaimOnCloseTx(
+ }
+ 
+ type claimWorkMutationInput struct {
++	// Now is the optional decision clock shared by a strict close's guard and release.
++	Now               time.Time
+ 	ProjectID         int64
+ 	ProjectName       string
+ 	IssueID           int64
+@@ -1278,7 +1306,7 @@ func (d *Store) annotateClaimWorkMutationTx(
+ 	if !hub {
+ 		return nil, nil
+ 	}
+-	events, err := d.expireTimedClaimsForProjectTx(ctx, tx, in.ProjectID, time.Now().UTC(), 0)
++	events, err := d.expireTimedClaimsForProjectTx(ctx, tx, in.ProjectID, db.ClaimNow(in.Now), 0)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/internal/db/sqlitestore/conformance_test.go b/internal/db/sqlitestore/conformance_test.go
+index 5221cf5..fc83944 100644
+--- a/internal/db/sqlitestore/conformance_test.go
++++ b/internal/db/sqlitestore/conformance_test.go
+@@ -2,9 +2,12 @@ package sqlitestore_test
+ 
+ import (
+ 	"context"
++	"database/sql/driver"
+ 	"encoding/json"
++	"fmt"
+ 	"path/filepath"
+ 	"strings"
++	"sync"
+ 	"testing"
+ 	"time"
+ 
+@@ -12,9 +15,22 @@ import (
+ 	"go.kenn.io/kata/internal/db"
+ 	"go.kenn.io/kata/internal/db/dbtest"
+ 	"go.kenn.io/kata/internal/db/sqlitestore"
++	"modernc.org/sqlite"
+ )
+ 
++var registerClaimCloseWait sync.Once
++
+ func TestStorageConformance(t *testing.T) {
++	registerClaimCloseWait.Do(func() {
++		require.NoError(t, sqlite.RegisterScalarFunction("test_claim_close_wait", 1, func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
++			deadline, err := time.Parse(time.RFC3339Nano, args[0].(string))
++			if err != nil {
++				return nil, err
++			}
++			time.Sleep(time.Until(deadline))
++			return int64(1), nil
++		}))
++	})
+ 	dbtest.RunStorageConformance(t, dbtest.Backend{
+ 		Name: "sqlite",
+ 		Open: func(t *testing.T) db.Storage {
+@@ -59,6 +75,19 @@ hlc_physical_ms,hlc_counter,content_hash
+ 				"project.restored", "worker", `{}`, strings.Repeat("e", 64))
+ 			return err
+ 		},
++		InvalidateClaimGuardBinding: func(ctx context.Context, store db.Storage, projectID int64) error {
++			_, err := store.(*sqlitestore.Store).ExecContext(ctx, `UPDATE federation_bindings SET role='hub', hub_project_uid=? WHERE project_id=?`, strings.Repeat("!", 26), projectID)
++			return err
++		},
++		InstallClaimCloseDelay: func(ctx context.Context, store db.Storage, deadline time.Time) (func() error, error) {
++			sqlStore := store.(*sqlitestore.Store)
++			_, err := sqlStore.ExecContext(ctx, fmt.Sprintf(`CREATE TRIGGER delay_claim_close BEFORE UPDATE OF status ON issues WHEN NEW.status='closed'
++			BEGIN SELECT test_claim_close_wait('%s'); END`, deadline.Add(10*time.Millisecond).UTC().Format(time.RFC3339Nano)))
++			return func() error {
++				_, err := sqlStore.ExecContext(context.Background(), `DROP TRIGGER IF EXISTS delay_claim_close`)
++				return err
++			}, err
++		},
+ 		InstallClaimReleaseFailure: func(ctx context.Context, store db.Storage) (func() error, error) {
+ 			sqlStore := store.(*sqlitestore.Store)
+ 			_, err := sqlStore.ExecContext(ctx, `
+diff --git a/internal/db/sqlitestore/queries.go b/internal/db/sqlitestore/queries.go
+index f1e4b66..42befdf 100644
+--- a/internal/db/sqlitestore/queries.go
++++ b/internal/db/sqlitestore/queries.go
+@@ -1458,8 +1458,8 @@ func (d *Store) CloseIssueWithEvents(
+ 	})
+ }
+ 
+-// CloseIssueGuarded applies the close and its optional revision precondition in
+-// the same transaction, then returns every event committed by that mutation.
++// CloseIssueGuarded applies optional revision and claim preconditions in the
++// close transaction, then returns every event committed by that mutation.
+ func (d *Store) CloseIssueGuarded(
+ 	ctx context.Context, p db.CloseIssueParams,
+ ) (db.Issue, []db.Event, bool, error) {
+@@ -1480,6 +1480,15 @@ func (d *Store) closeIssueGuarded(
+ 	}
+ 	defer func() { _ = tx.Rollback() }()
+ 
++	strictClaim := p.ClaimGuard != nil && p.ClaimGuard.Required
++	if strictClaim {
++		// BeginTx is deferred. Take the writer lock before resolving the issue
++		// or sampling lease time, while preserving the existing request fence.
++		// A zero-row update locks without changing rows or firing row triggers.
++		if _, err := tx.ExecContext(ctx, `UPDATE issues SET id=id WHERE 0`); err != nil {
++			return db.Issue{}, nil, false, err
++		}
++	}
+ 	issue, projectName, err := lookupIssueForEvent(ctx, tx, p.IssueID)
+ 	if err != nil {
+ 		return db.Issue{}, nil, false, err
+@@ -1490,6 +1499,14 @@ func (d *Store) closeIssueGuarded(
+ 	if p.IfMatchRev != nil && issue.Revision != *p.IfMatchRev {
+ 		return db.Issue{}, nil, false, &db.RevisionConflictError{CurrentRevision: issue.Revision}
+ 	}
++	var guardedClaim *db.IssueClaim
++	var claimDecisionTime time.Time
++	if strictClaim {
++		guardedClaim, claimDecisionTime, err = guardedCloseClaimTx(ctx, tx, issue, p.ClaimGuard)
++		if err != nil {
++			return db.Issue{}, nil, false, err
++		}
++	}
+ 	if issue.Status == "closed" {
+ 		if err := tx.Commit(); err != nil {
+ 			return db.Issue{}, nil, false, err
+@@ -1502,6 +1519,9 @@ func (d *Store) closeIssueGuarded(
+ 		return db.Issue{}, nil, false, db.ErrOpenChildren
+ 	}
+ 	closedAt := time.Now().UTC().Format(sqliteTimeFormat)
++	if guardedClaim != nil {
++		closedAt = claimDecisionTime.Format(sqliteTimeFormat)
++	}
+ 	if _, err := tx.ExecContext(ctx,
+ 		`UPDATE issues
+ 		 SET status        = 'closed',
+@@ -1573,17 +1593,28 @@ func (d *Store) closeIssueGuarded(
+ 		EventType:         "issue.closed",
+ 		Actor:             p.Actor,
+ 		HolderInstanceUID: d.InstanceUID(),
++		Now:               claimDecisionTime,
+ 	})
+ 	if err != nil {
+ 		return db.Issue{}, nil, false, err
+ 	}
+ 	events = append(events, auditEvents...)
+-	released, err := d.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, issue, projectName, p.Actor)
+-	if err != nil {
+-		return db.Issue{}, nil, false, err
+-	}
+-	if released != nil {
+-		events = append(events, *released)
++	if guardedClaim != nil {
++		// Release the checked tenure using the same clock as guard and audit.
++		_, released, err := d.releaseClaimTx(ctx, tx, *guardedClaim, issue.ID, projectName,
++			"claim.released", p.Actor, "issue_closed", claimDecisionTime)
++		if err != nil {
++			return db.Issue{}, nil, false, err
++		}
++		events = append(events, released)
++	} else {
++		released, err := d.releaseLiveAuthoritativeClaimOnCloseTx(ctx, tx, issue, projectName, p.Actor)
++		if err != nil {
++			return db.Issue{}, nil, false, err
++		}
++		if released != nil {
++			events = append(events, *released)
++		}
+ 	}
+ 	lastEventID := events[len(events)-1].ID
+ 	if p.Reason == "done" && issue.RecurrenceID != nil && issue.OccurrenceKey != nil {
+diff --git a/pkg/client/generated/enums.go b/pkg/client/generated/enums.go
+index ec29b39..879bee8 100644
+--- a/pkg/client/generated/enums.go
++++ b/pkg/client/generated/enums.go
+@@ -72,12 +72,13 @@ type CloseActionRequestBodyRetryProtocol string
+ const (
+ 	CloseActionRequestBodyRetryProtocolEmpty CloseActionRequestBodyRetryProtocol = ""
+ 	CloseV1                                  CloseActionRequestBodyRetryProtocol = "close-v1"
++	CloseV2                                  CloseActionRequestBodyRetryProtocol = "close-v2"
+ )
+ 
+ // Validate checks if the CloseActionRequestBodyRetryProtocol value is valid
+ func (c CloseActionRequestBodyRetryProtocol) Validate() error {
+ 	switch c {
+-	case CloseActionRequestBodyRetryProtocolEmpty, CloseV1:
++	case CloseActionRequestBodyRetryProtocolEmpty, CloseV1, CloseV2:
+ 		return nil
+ 	default:
+ 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid CloseActionRequestBodyRetryProtocol value, got: %v", c))
+diff --git a/pkg/client/generated/headers.go b/pkg/client/generated/headers.go
+index 8b39c09..fdfbf25 100644
+--- a/pkg/client/generated/headers.go
++++ b/pkg/client/generated/headers.go
+@@ -59,6 +59,8 @@ type EditIssueHeaders struct {
+ type CloseIssueHeaders struct {
+ 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+ 	IfMatch        *string `json:"If-Match,omitempty"`
++	IfLeaseMatch   *string `json:"If-Lease-Match,omitempty"`
++	Authorization  *string `json:"Authorization,omitempty"`
+ }
+ 
+ type DeleteIssueHeaders struct {
+diff --git a/pkg/client/generated/types.go b/pkg/client/generated/types.go
+index 5fa685d..5c51e3d 100644
+--- a/pkg/client/generated/types.go
++++ b/pkg/client/generated/types.go
+@@ -463,6 +463,7 @@ func (c ClaimViolationOut) Validate() error {
+ 
+ type CloseActionRequestBody struct {
+ 	Actor         *string                              `json:"actor,omitempty"`
++	ClientKind    *string                              `json:"client_kind,omitempty"`
+ 	DryRun        *bool                                `json:"dry_run,omitempty"`
+ 	Evidence      []Evidence                           `json:"evidence,omitempty"`
+ 	Message       *string                              `json:"message,omitempty"`
+diff --git a/pkg/client/openapi.yaml b/pkg/client/openapi.yaml
+index 61859dd..c7cbd04 100644
+--- a/pkg/client/openapi.yaml
++++ b/pkg/client/openapi.yaml
+@@ -287,6 +287,8 @@ components:
+       properties:
+         actor:
+           type: string
++        client_kind:
++          type: string
+         dry_run:
+           type: boolean
+         evidence:
+@@ -307,6 +309,7 @@ components:
+         retry_protocol:
+           enum:
+             - close-v1
++            - close-v2
+             - ""
+           type: string
+         source:
+@@ -4301,7 +4304,7 @@ components:
+       type: object
+ info:
+   title: kata
+-  version: 0.17.0
++  version: 0.18.0
+ openapi: 3.0.3
+ paths:
+   /api/v1/audit/closes:
+@@ -6014,6 +6017,14 @@ paths:
+           name: If-Match
+           schema:
+             type: string
++        - in: header
++          name: If-Lease-Match
++          schema:
++            type: string
++        - in: header
++          name: Authorization
++          schema:
++            type: string
+       requestBody:
+         content:
+           application/json:
+diff --git a/service_close_lease_test.go b/service_close_lease_test.go
+new file mode 100644
+index 0000000..094dee8
+--- /dev/null
++++ b/service_close_lease_test.go
+@@ -0,0 +1,58 @@
++package kata_test
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strconv"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata"
++)
++
++func TestServiceCloseV2UsesAcquireSubjectIdentity(t *testing.T) {
++	controller := &recordingAccessController{}
++	service, err := kata.New(context.Background(), kata.Config{DSN: filepath.Join(t.TempDir(), "service.db"), Access: controller})
++	require.NoError(t, err)
++	t.Cleanup(func() { require.NoError(t, service.Close()) })
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		subject := r.Header.Get("X-Test-Subject")
++		if subject == "" {
++			subject = "pi:session:execution-one"
++		}
++		service.Handler().ServeHTTP(w, r.WithContext(kata.WithPrincipal(r.Context(), kata.Principal{Subject: subject, Actor: "Agent"})))
++	}))
++	t.Cleanup(server.Close)
++	project := createProject(t, server.URL, "example-project")
++	issue := createAccessIssue(t, server, project.Project.ID, "strict close")
++	path := server.URL + "/api/v1/projects/" + strconv.FormatInt(project.Project.ID, 10) + "/issues/" + issue.Issue.ShortID
++	var acquired struct {
++		Lease struct {
++			ClaimUID string `json:"claim_uid"`
++		} `json:"lease"`
++	}
++	postJSON(t, server.Client(), path+"/lease/actions/acquire", `{"holder":"ignored","client_kind":"ignored","claim_kind":"hard"}`, &acquired)
++	require.NotEmpty(t, acquired.Lease.ClaimUID)
++	for _, subject := range []string{"pi:session:execution-two", "pi:session:execution-one"} {
++		req, err := http.NewRequest(http.MethodPost, path+"/actions/close", bytes.NewBufferString(`{"actor":"ignored","client_kind":"different-ignored-value","reason":"wontfix","message":"Reviewed the request and recorded why the work should stop here.","retry_protocol":"close-v2"}`))
++		require.NoError(t, err)
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("X-Test-Subject", subject)
++		req.Header.Set("If-Lease-Match", acquired.Lease.ClaimUID)
++		resp, err := server.Client().Do(req)
++		require.NoError(t, err)
++		var body map[string]any
++		require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
++		require.NoError(t, resp.Body.Close())
++		if subject == "pi:session:execution-two" {
++			assert.Equal(t, http.StatusConflict, resp.StatusCode, body)
++		} else {
++			assert.Equal(t, http.StatusOK, resp.StatusCode, body)
++		}
++	}
++}
+-- 
+2.50.1 (Apple Git-155)
+

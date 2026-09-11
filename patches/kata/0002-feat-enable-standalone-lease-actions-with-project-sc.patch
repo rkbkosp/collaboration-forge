@@ -1,0 +1,916 @@
+From c10bd132629caa2187f113d45e0a0763780824a4 Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 08:43:15 +0800
+Subject: [PATCH 2/8] feat: enable standalone lease actions with project-scoped
+ expiry
+
+---
+ docs/development/standalone-lease-baseline.md |  73 +++++--
+ internal/daemon/handlers_claims.go            |  40 ++--
+ .../daemon/handlers_claims_standalone_test.go | 148 ++++++++++++++
+ internal/daemon/handlers_claims_test.go       |  31 +--
+ internal/daemon/lease_authority_test.go       |  14 +-
+ internal/db/dbtest/conformance.go             |   9 +
+ .../db/dbtest/conformance_claims_expiry.go    | 183 ++++++++++++++++++
+ internal/db/pgstore/claims_core.go            |  16 +-
+ internal/db/sqlitestore/claims.go             |  22 ++-
+ 9 files changed, 470 insertions(+), 66 deletions(-)
+ create mode 100644 internal/daemon/handlers_claims_standalone_test.go
+ create mode 100644 internal/db/dbtest/conformance_claims_expiry.go
+
+diff --git a/docs/development/standalone-lease-baseline.md b/docs/development/standalone-lease-baseline.md
+index e3047cd..668a2f4 100644
+--- a/docs/development/standalone-lease-baseline.md
++++ b/docs/development/standalone-lease-baseline.md
+@@ -64,18 +64,31 @@ It describes the pinned upstream, not completed standalone support.
+   release, force-release, and status currently invoke global expiry helpers in
+   `sqlitestore/claims.go` and `pgstore/claims_core.go`. Merely changing the
+   background sweeper does not protect cached spoke claims in a mixed database.
+-  Add backend conformance coverage and a separate focused fix before treating
+-  standalone/spoke isolation as complete.
++  The revised K2 scopes each operation's opportunity expiry to the resolved
++  issue's project, with shared backend conformance coverage, before enabling
++  standalone routes. Storage does not infer authority; callers remain
++  responsible for never applying authoritative operations to spoke caches.
+ - **Guard identity must be exact.** Acquire/renew/release compare holder,
+   holder instance, and client kind. The legacy mutation gate can compare less.
+   Renew/release have no expected-ClaimUID parameter, making per-tenure principal
+   uniqueness necessary even after strict close is added.
+ - **Read-only status is not proof of liveness.** An expired cached row can still
+   have Held=true. Guard validation must check actual expiry in the transaction.
+-- **Protocol capability matters.** Existing close-v1 negotiation does not prove
+-  that an older server enforces the new header. Strict clients must fail closed
+-  against unsupported servers. Do not deploy the new precondition before its
+-  idempotency fingerprint support lands.
++- **Protocol version matters.** Revised K6 introduces close-v2 together with
++  the exact lease guard. A lease header without close-v2 must be rejected;
++  strict clients send both. Verify that old servers reject the unknown protocol
++  enum rather than silently ignoring the header. Capability discovery is not
++  the correctness boundary. K7 fingerprints protocol and ClaimUID, preserving
++  receipt-before-guard replay and close-v1 compatibility. Do not deploy the new
++  precondition before its idempotency fingerprint support lands.
++- **Claim attempts survive uncertain responses, not runtime replacement.**
++  F4/F5 generate and save one execution ID before sending a logical acquire;
++  network retries reuse it. Definitive denial/release/loss retires it. A new Pi
++  runtime must not restore it from conversation history, even with the same
++  session UUID. Waiting for the old lease's TTL is an intentional safety cost.
++- **Close principal must reuse the acquire identity seam.** K6 must derive the
++  same holder/instance/client-kind through a shared request-principal helper,
++  not reconstruct the host subject hash or substitute the display actor.
+ - **SQLite embedding is single-owner.** Its idempotency lock is Store-local,
+   unlike PostgreSQL advisory locks. Preserve the single-daemon file ownership
+   assumption in the embedding host.
+@@ -101,9 +114,45 @@ Kata workspace; issue tracking initialization remains a separate setup step.
+ 
+ ## Delivery order
+ 
+-K1 only classifies authority and preserves existing routes and errors. Then
+-implement standalone actions, read projection, authoritative expiry, close-time
+-release, typed strict precondition, retry fingerprint support, and terminology
+-in independently tested commits. The opportunity-expiry fix above is an
+-additional prerequisite for authoritative isolation. Begin the embedding host
+-and Pi extension only after the Kata correctness work passes.
++K1 only classifies authority and preserves existing routes and errors. Revised
++K2 enables standalone actions together with target-project opportunity expiry;
++force-release retains its existing authentication and host authorization.
++An existing daemon test expected expiry in another project; this incidental
++side effect is deliberately removed. The rollback test instead uses a stale
++sibling in the target project so it still exercises actual expiry rollback.
++K3 changes read projection; K4 sweeps only authoritative projects; K5 extracts
++narrow close-time authoritative release without broadening federation audit;
++K6 adds close-v2 and the typed exact principal/ClaimUID guard; K7 hardens retry
++fingerprints and ambiguous commits. Keep these independently tested commits
++and do not deploy K6 without K7. Begin the embedding host and Pi extension only
++after the Kata correctness work passes.
++
++## K2 implementation verification
++
++Standalone acquire/renew/release/status/force-release now use local authority.
++Spoke forwarding and force-release authentication remain unchanged; spoke
++local force-release is refused. SQLite and PostgreSQL opportunity expiry uses
++only the resolved issue's project, including force-release.
++
++New tests first reproduced standalone HTTP 404 and cross-project expiry. The
++shared storage matrix covers standalone/hub × acquire/renew/release/force/status:
++expiry still occurs for a stale sibling in the target project, while both a
++spoke cache and an unrelated authoritative project's claim remain unchanged.
++Returned expiry events are checked against persisted events.
++
++Passed after implementation:
++
++```sh
++go test ./internal/daemon -count=1
++go test . -count=1
++go test ./internal/db/sqlitestore -count=1
++go test ./internal/db/pgstore -run 'TestStorageConformance|Claim' -count=1 -timeout=5m
++go build ./...
++git diff --check
++```
++
++The PostgreSQL conformance run used a real PostgreSQL backend. A separate attempt
++at the entire PostgreSQL package exceeded the shell's 600-second limit; no
++full-package PostgreSQL pass is claimed. Its conformance and claim tests were
++subsequently rerun successfully. No show hydration, sweeper, close, strict gate,
++violation audit, persisted schema, or CLI changes are included in K2.
+diff --git a/internal/daemon/handlers_claims.go b/internal/daemon/handlers_claims.go
+index 909edb6..e3dd59a 100644
+--- a/internal/daemon/handlers_claims.go
++++ b/internal/daemon/handlers_claims.go
+@@ -86,7 +86,7 @@ func registerClaimHandlers(humaAPI huma.API, cfg ServerConfig) {
+ 		if err != nil {
+ 			return nil, err
+ 		}
+-		if err := requireHubClaimBinding(ctx, cfg.DB, in.ProjectID); err != nil {
++		if err := requireLocalClaimAuthority(ctx, cfg.DB, in.ProjectID); err != nil {
+ 			return nil, err
+ 		}
+ 		actor := actorFor(ctx, strings.TrimSpace(in.Body.Actor))
+@@ -152,12 +152,12 @@ func handleClaimAcquire(
+ 	}
+ 	defer finishTransport()
+ 
+-	binding, err := claimBinding(ctx, cfg.DB, projectID)
++	authority, binding, err := claimAuthority(ctx, cfg.DB, projectID)
+ 	if err != nil {
+ 		return api.ClaimActionResponseBody{}, err
+ 	}
+ 	principal = boundSpokeClaimPrincipal(binding, principal)
+-	if binding.Role == db.FederationRoleHub {
++	if authority == leaseAuthorityStandalone || authority == leaseAuthorityHub {
+ 		result, err := cfg.DB.AcquireClaim(ctx, db.AcquireClaimParams{
+ 			ProjectID: projectID,
+ 			IssueRef:  ref,
+@@ -229,12 +229,12 @@ func handleClaimRenew(
+ 	}
+ 	defer finishTransport()
+ 
+-	binding, err := claimBinding(ctx, cfg.DB, projectID)
++	authority, binding, err := claimAuthority(ctx, cfg.DB, projectID)
+ 	if err != nil {
+ 		return api.ClaimActionResponseBody{}, err
+ 	}
+ 	principal = boundSpokeClaimPrincipal(binding, principal)
+-	if binding.Role == db.FederationRoleHub {
++	if authority == leaseAuthorityStandalone || authority == leaseAuthorityHub {
+ 		result, err := cfg.DB.RenewClaim(ctx, db.RenewClaimParams{
+ 			ProjectID: projectID,
+ 			IssueRef:  ref,
+@@ -279,12 +279,12 @@ func handleClaimRelease(
+ 	}
+ 	defer finishTransport()
+ 
+-	binding, err := claimBinding(ctx, cfg.DB, projectID)
++	authority, binding, err := claimAuthority(ctx, cfg.DB, projectID)
+ 	if err != nil {
+ 		return api.ClaimActionResponseBody{}, err
+ 	}
+ 	principal = boundSpokeClaimPrincipal(binding, principal)
+-	if binding.Role == db.FederationRoleHub {
++	if authority == leaseAuthorityStandalone || authority == leaseAuthorityHub {
+ 		result, err := cfg.DB.ReleaseClaim(ctx, db.ReleaseClaimParams{
+ 			ProjectID: projectID,
+ 			IssueRef:  ref,
+@@ -325,11 +325,11 @@ func handleClaimStatus(ctx context.Context, cfg ServerConfig, projectID int64, r
+ 	}
+ 	defer finishTransport()
+ 
+-	binding, err := claimBinding(ctx, cfg.DB, projectID)
++	authority, binding, err := claimAuthority(ctx, cfg.DB, projectID)
+ 	if err != nil {
+ 		return api.ClaimStatusBody{}, err
+ 	}
+-	if binding.Role == db.FederationRoleHub {
++	if authority == leaseAuthorityStandalone || authority == leaseAuthorityHub {
+ 		status, err := cfg.DB.ClaimStatus(ctx, projectID, ref, time.Now().UTC())
+ 		if err != nil {
+ 			return api.ClaimStatusBody{}, claimAPIError(err)
+@@ -359,21 +359,18 @@ func handleClaimStatus(ctx context.Context, cfg ServerConfig, projectID int64, r
+ 	return resp, nil
+ }
+ 
+-func claimBinding(ctx context.Context, store db.Storage, projectID int64) (db.FederationBinding, error) {
++func claimAuthority(ctx context.Context, store db.Storage, projectID int64) (issueLeaseAuthority, db.FederationBinding, error) {
+ 	authority, binding, err := resolveIssueLeaseAuthority(ctx, store, projectID)
+ 	if err != nil {
+-		return db.FederationBinding{}, err
++		return authority, db.FederationBinding{}, err
+ 	}
+-	switch authority {
+-	case leaseAuthorityStandalone:
+-		return db.FederationBinding{}, api.NewError(http.StatusNotFound, "federation_not_found", "project is not federated", "", nil)
+-	case leaseAuthorityDisabled:
++	if authority == leaseAuthorityDisabled {
+ 		if !binding.Enabled {
+-			return db.FederationBinding{}, api.NewError(http.StatusConflict, "federated_read_only", "federation binding is disabled", "", nil)
++			return authority, db.FederationBinding{}, api.NewError(http.StatusConflict, "federated_read_only", "federation binding is disabled", "", nil)
+ 		}
+-		return db.FederationBinding{}, api.NewError(http.StatusConflict, "federated_read_only", "unknown federation binding role", "", nil)
++		return authority, db.FederationBinding{}, api.NewError(http.StatusConflict, "federated_read_only", "unknown federation binding role", "", nil)
+ 	}
+-	return binding, nil
++	return authority, binding, nil
+ }
+ 
+ func beginClaimFederationTransport(
+@@ -748,15 +745,12 @@ func claimHubPath(hubProjectID int64, ref, suffix string) string {
+ 	return fmt.Sprintf("/api/v1/projects/%d/issues/%s/%s", hubProjectID, url.PathEscape(ref), suffix)
+ }
+ 
+-func requireHubClaimBinding(ctx context.Context, store db.Storage, projectID int64) error {
++func requireLocalClaimAuthority(ctx context.Context, store db.Storage, projectID int64) error {
+ 	authority, _, err := resolveIssueLeaseAuthority(ctx, store, projectID)
+ 	if err != nil {
+ 		return err
+ 	}
+-	if authority == leaseAuthorityStandalone {
+-		return api.NewError(http.StatusNotFound, "federation_not_found", "project is not a federation hub", "", nil)
+-	}
+-	if authority != leaseAuthorityHub {
++	if authority != leaseAuthorityStandalone && authority != leaseAuthorityHub {
+ 		return api.NewError(http.StatusConflict, "federated_read_only", "claim actions must be resolved by the hub project", "", nil)
+ 	}
+ 	return nil
+diff --git a/internal/daemon/handlers_claims_standalone_test.go b/internal/daemon/handlers_claims_standalone_test.go
+new file mode 100644
+index 0000000..4d60b39
+--- /dev/null
++++ b/internal/daemon/handlers_claims_standalone_test.go
+@@ -0,0 +1,148 @@
++package daemon_test
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/config"
++	"go.kenn.io/kata/internal/db"
++	"go.kenn.io/kata/internal/testenv"
++)
++
++func createStandaloneClaimIssue(t *testing.T, env *testenv.Env) (db.Project, db.Issue) {
++	t.Helper()
++	project, err := env.DB.CreateProject(context.Background(), "standalone-project")
++	require.NoError(t, err)
++	issue, _, err := env.DB.CreateIssue(context.Background(), db.CreateIssueParams{ProjectID: project.ID, Title: "lease lifecycle", Author: "tester"})
++	require.NoError(t, err)
++	return project, issue
++}
++
++func TestStandaloneLeaseLifecycle(t *testing.T) {
++	for _, kind := range []string{"hard", "timed"} {
++		t.Run(kind, func(t *testing.T) {
++			env := testenv.New(t, testenv.WithAuthToken("admin-token"))
++			project, issue := createStandaloneClaimIssue(t, env)
++			headers := bearer("admin-token")
++			body := map[string]any{"holder": "agent-a", "client_kind": "cli", "claim_kind": kind, "ttl_seconds": 120}
++			var acquired claimResponseBody
++			resp := claimPost(t, env, project.ID, issue.ShortID, "claim", body, headers, &acquired)
++			require.Equal(t, http.StatusOK, resp.StatusCode)
++			require.True(t, acquired.Granted)
++			require.NotNil(t, acquired.Claim)
++			assert.Equal(t, kind, acquired.Claim.ClaimKind)
++			var repeated claimResponseBody
++			resp = claimPost(t, env, project.ID, issue.ShortID, "claim", body, headers, &repeated)
++			require.Equal(t, http.StatusOK, resp.StatusCode)
++			require.True(t, repeated.Granted)
++			require.NotNil(t, repeated.Claim)
++			assert.Equal(t, acquired.Claim.ClaimUID, repeated.Claim.ClaimUID)
++			var denied claimResponseBody
++			resp = claimPost(t, env, project.ID, issue.ShortID, "claim", map[string]any{"holder": "agent-b", "client_kind": "cli", "claim_kind": "hard"}, headers, &denied)
++			require.Equal(t, http.StatusOK, resp.StatusCode)
++			assert.False(t, denied.Granted, "retain existing grant/deny wire semantics")
++			require.NotNil(t, denied.Claim)
++			assert.Equal(t, acquired.Claim.ClaimUID, denied.Claim.ClaimUID)
++			resp, raw := envDoRaw(t, env, http.MethodGet, claimStatusPath(project.ID, issue.ShortID), nil, headers)
++			require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
++			var status claimStatusBody
++			require.NoError(t, json.Unmarshal(raw, &status))
++			require.True(t, status.Held)
++			require.NotNil(t, status.Claim)
++			assert.Equal(t, acquired.Claim.ClaimUID, status.Claim.ClaimUID)
++			assert.False(t, status.HubNow.IsZero())
++			for _, action := range []string{"renew", "release"} {
++				resp, raw = envDoRaw(t, env, http.MethodPost, claimActionPath(project.ID, issue.ShortID, action), map[string]any{"holder": "agent-b", "client_kind": "cli", "ttl_seconds": 300}, headers)
++				assertAPIError(t, resp.StatusCode, raw, http.StatusConflict, "claim_not_held")
++			}
++			if kind == "timed" {
++				var renewed claimResponseBody
++				resp = claimPost(t, env, project.ID, issue.ShortID, "renew", map[string]any{"holder": "agent-a", "client_kind": "cli", "ttl_seconds": 300}, headers, &renewed)
++				require.Equal(t, http.StatusOK, resp.StatusCode)
++				require.NotNil(t, renewed.Claim)
++				assert.Equal(t, acquired.Claim.ClaimUID, renewed.Claim.ClaimUID)
++				require.NotNil(t, renewed.Claim.ExpiresAt)
++				require.NotNil(t, acquired.Claim.ExpiresAt)
++				assert.True(t, renewed.Claim.ExpiresAt.After(*acquired.Claim.ExpiresAt))
++			}
++			var released claimResponseBody
++			resp = claimPost(t, env, project.ID, issue.ShortID, "release", body, headers, &released)
++			require.Equal(t, http.StatusOK, resp.StatusCode)
++			require.NotNil(t, released.Event)
++			assert.Equal(t, "claim.released", released.Event.Type)
++			resp, raw = envDoRaw(t, env, http.MethodGet, claimStatusPath(project.ID, issue.ShortID), nil, headers)
++			require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
++			status = claimStatusBody{}
++			require.NoError(t, json.Unmarshal(raw, &status))
++			assert.False(t, status.Held)
++		})
++	}
++}
++
++func TestStandaloneForceReleasePreservesAdminAuthentication(t *testing.T) {
++	env := testenv.New(t, testenv.WithAuthToken("admin-token"))
++	project, issue := createStandaloneClaimIssue(t, env)
++	hub, _ := createClaimHubIssue(t, env)
++	enrollment := createClaimEnrollment(t, env, hub.ID, federationTestSpokeUID, "claim")
++	var acquired claimResponseBody
++	resp := claimPost(t, env, project.ID, issue.ShortID, "claim", map[string]any{"holder": "agent-a", "claim_kind": "hard"}, bearer("admin-token"), &acquired)
++	require.Equal(t, http.StatusOK, resp.StatusCode)
++	require.NotNil(t, acquired.Claim)
++	for _, token := range []string{"", "wrong-token", enrollment.Token} {
++		var headers map[string]string
++		if token != "" {
++			headers = bearer(token)
++		}
++		resp, _ := envDoRaw(t, env, http.MethodPost, claimActionPath(project.ID, issue.ShortID, "force_release"), map[string]any{"actor": "admin"}, headers)
++		assert.Contains(t, []int{http.StatusUnauthorized, http.StatusForbidden}, resp.StatusCode)
++		status, err := env.DB.ClaimStatusReadOnly(context.Background(), project.ID, issue.ShortID, time.Now())
++		require.NoError(t, err)
++		require.NotNil(t, status.Claim)
++		assert.Equal(t, acquired.Claim.ClaimUID, status.Claim.ClaimUID)
++	}
++	var released claimResponseBody
++	resp = claimPost(t, env, project.ID, issue.ShortID, "force_release", map[string]any{"actor": "admin"}, bearer("admin-token"), &released)
++	require.Equal(t, http.StatusOK, resp.StatusCode)
++	require.NotNil(t, released.Event)
++	assert.Equal(t, "claim.force_released", released.Event.Type)
++	require.NotNil(t, released.Claim)
++	assert.NotNil(t, released.Claim.ReleasedAt)
++}
++
++func TestSpokeForceReleaseStillRefused(t *testing.T) {
++	hub, spoke, hubProject, spokeProject, issue, token := createClaimForwardingPair(t, "claim")
++	require.NoError(t, config.WriteFederationCredential(spokeProject.UID, config.FederationCredential{
++		HubURL: hub.URL, HubProjectID: hubProject.ID, Token: token, Capabilities: "claim",
++	}))
++	var acquired claimResponseBody
++	resp := claimPost(t, spoke, spokeProject.ID, issue.ShortID, "claim", map[string]any{"holder": "agent-a", "client_kind": "cli", "claim_kind": "hard"}, nil, &acquired)
++	require.Equal(t, http.StatusOK, resp.StatusCode)
++	require.NotNil(t, acquired.Claim)
++	resp, raw := envDoRaw(t, spoke, http.MethodPost, claimActionPath(spokeProject.ID, issue.ShortID, "force_release"), map[string]any{"actor": "admin"}, nil)
++	assertAPIError(t, resp.StatusCode, raw, http.StatusConflict, "federated_read_only")
++	for _, target := range []struct {
++		env       *testenv.Env
++		projectID int64
++	}{{hub, hubProject.ID}, {spoke, spokeProject.ID}} {
++		status, err := target.env.DB.ClaimStatusReadOnly(context.Background(), target.projectID, issue.UID, time.Now())
++		require.NoError(t, err)
++		require.NotNil(t, status.Claim)
++		assert.Equal(t, acquired.Claim.ClaimUID, status.Claim.ClaimUID)
++	}
++}
++
++func TestStandaloneLeaseRoutesRequireAuthentication(t *testing.T) {
++	env := testenv.New(t, testenv.WithAuthToken("admin-token"))
++	project, issue := createStandaloneClaimIssue(t, env)
++	for _, action := range []string{"claim", "renew", "release", "force_release"} {
++		resp := claimPost(t, env, project.ID, issue.ShortID, action, map[string]any{"holder": "agent-a"}, nil, nil)
++		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
++	}
++	resp, raw := envDoRaw(t, env, http.MethodGet, claimStatusPath(project.ID, issue.ShortID), nil, nil)
++	assertAPIError(t, resp.StatusCode, raw, http.StatusUnauthorized, "auth_required")
++}
+diff --git a/internal/daemon/handlers_claims_test.go b/internal/daemon/handlers_claims_test.go
+index c5eef97..229dabb 100644
+--- a/internal/daemon/handlers_claims_test.go
++++ b/internal/daemon/handlers_claims_test.go
+@@ -544,7 +544,9 @@ func TestClaimActionAcquireBroadcastsOpportunisticExpiryBeforeAcquire(t *testing
+ 	assert.Less(t, first.Event.ID, second.Event.ID)
+ }
+ 
+-func TestClaimActionBroadcastsOpportunisticExpiryOnExpiredClaimProject(t *testing.T) {
++// Cross-project opportunistic expiry was an incidental side effect, not part
++// of a lease operation's authority. Only the target project may be expired.
++func TestClaimActionDoesNotExpireOtherProject(t *testing.T) {
+ 	env := testenv.New(t)
+ 	projectA, issueA := createClaimHubIssue(t, env)
+ 	projectB, issueB := createClaimHubIssueNamed(t, env, "hub-b")
+@@ -571,10 +573,12 @@ func TestClaimActionBroadcastsOpportunisticExpiryOnExpiredClaimProject(t *testin
+ 		map[string]any{"holder": "agent-a", "client_kind": "cli", "claim_kind": "hard"}, nil, &out)
+ 
+ 	require.Equal(t, http.StatusOK, resp.StatusCode)
+-	expired := receiveMsg(t, subB.Ch, time.Second, "other project claim expired broadcast")
+-	require.NotNil(t, expired.Event)
+-	assert.Equal(t, "claim.expired", expired.Event.Type)
+-	assert.Equal(t, projectB.ID, expired.ProjectID)
++	assertNoReceive(t, subB.Ch, 100*time.Millisecond, "another project's lease must not emit expiry")
++	status, err := env.DB.ClaimStatusReadOnly(context.Background(), projectB.ID, issueB.ShortID, time.Now())
++	require.NoError(t, err)
++	require.True(t, status.Held, "another project's expired lease row must remain untouched")
++	require.NotNil(t, status.Claim)
++	assert.Nil(t, status.Claim.ReleasedAt)
+ 	acquired := receiveMsg(t, subA.Ch, time.Second, "current project claim acquired broadcast")
+ 	require.NotNil(t, acquired.Event)
+ 	assert.Equal(t, "claim.acquired", acquired.Event.Type)
+@@ -584,12 +588,15 @@ func TestClaimActionBroadcastsOpportunisticExpiryOnExpiredClaimProject(t *testin
+ func TestClaimActionDoesNotBroadcastRolledBackOpportunisticExpiry(t *testing.T) {
+ 	env := testenv.New(t)
+ 	projectA, issueA := createClaimHubIssue(t, env)
+-	projectB, issueB := createClaimHubIssueNamed(t, env, "hub-b")
++	// Keep the stale sibling inside the target project so this still exercises
++	// rollback of attempted expiry, rather than merely project isolation.
++	issueB, _, err := env.DB.CreateIssue(context.Background(), db.CreateIssueParams{
++		ProjectID: projectA.ID, Title: "stale sibling", Author: "tester",
++	})
++	require.NoError(t, err)
+ 	subA := env.Broadcaster.Subscribe(daemon.SubFilter{ProjectID: projectA.ID})
+ 	defer subA.Unsub()
+-	subB := env.Broadcaster.Subscribe(daemon.SubFilter{ProjectID: projectB.ID})
+-	defer subB.Unsub()
+-	_, err := env.DB.AcquireClaim(context.Background(), db.AcquireClaimParams{
++	_, err = env.DB.AcquireClaim(context.Background(), db.AcquireClaimParams{
+ 		ProjectID: projectA.ID,
+ 		IssueRef:  issueA.ShortID,
+ 		Principal: db.ClaimPrincipal{
+@@ -602,7 +609,7 @@ func TestClaimActionDoesNotBroadcastRolledBackOpportunisticExpiry(t *testing.T)
+ 	})
+ 	require.NoError(t, err)
+ 	_, err = env.DB.AcquireClaim(context.Background(), db.AcquireClaimParams{
+-		ProjectID: projectB.ID,
++		ProjectID: projectA.ID,
+ 		IssueRef:  issueB.ShortID,
+ 		Principal: db.ClaimPrincipal{
+ 			HolderInstanceUID: env.DB.InstanceUID(),
+@@ -620,7 +627,9 @@ func TestClaimActionDoesNotBroadcastRolledBackOpportunisticExpiry(t *testing.T)
+ 
+ 	require.Equal(t, http.StatusOK, resp.StatusCode)
+ 	assertNoReceive(t, subA.Ch, 100*time.Millisecond, "denied claim should not broadcast rolled-back expiration")
+-	assertNoReceive(t, subB.Ch, 100*time.Millisecond, "denied claim should not broadcast rolled-back expiration")
++	status, err := env.DB.ClaimStatusReadOnly(context.Background(), projectA.ID, issueB.ShortID, time.Now())
++	require.NoError(t, err)
++	assert.True(t, status.Held, "failed acquire must roll back same-project expiry")
+ }
+ 
+ func TestClaimStatusBroadcastsOpportunisticExpiry(t *testing.T) {
+diff --git a/internal/daemon/lease_authority_test.go b/internal/daemon/lease_authority_test.go
+index cf3617e..e4948aa 100644
+--- a/internal/daemon/lease_authority_test.go
++++ b/internal/daemon/lease_authority_test.go
+@@ -11,8 +11,8 @@ import (
+ 	"go.kenn.io/kata/internal/db"
+ )
+ 
+-// K1 contract: classify authority without opening standalone routes or changing
+-// either route family's existing refusal semantics.
++// Standalone and hubs are local authority; spokes may only forward ordinary
++// actions. Disabled/invalid bindings retain the original refusal semantics.
+ func TestIssueLeaseAuthorityClassification(t *testing.T) {
+ 	ctx := context.Background()
+ 	store := openClaimGateHelperDB(t)
+@@ -28,7 +28,7 @@ func TestIssueLeaseAuthorityClassification(t *testing.T) {
+ 		forceStatus   int
+ 		forceCode     string
+ 	}{
+-		{name: "standalone", err: db.ErrNotFound, want: leaseAuthorityStandalone, actionStatus: 404, actionCode: "federation_not_found", actionMessage: "project is not federated", forceStatus: 404, forceCode: "federation_not_found"},
++		{name: "standalone", err: db.ErrNotFound, want: leaseAuthorityStandalone},
+ 		{name: "hub", binding: db.FederationBinding{Role: db.FederationRoleHub, Enabled: true}, want: leaseAuthorityHub},
+ 		{name: "spoke", binding: db.FederationBinding{Role: db.FederationRoleSpoke, Enabled: true}, want: leaseAuthoritySpoke, forceStatus: 409, forceCode: "federated_read_only"},
+ 		{name: "disabled", binding: db.FederationBinding{Role: db.FederationRoleHub}, want: leaseAuthorityDisabled, actionStatus: 409, actionCode: "federated_read_only", actionMessage: "federation binding is disabled", forceStatus: 409, forceCode: "federated_read_only"},
+@@ -44,14 +44,14 @@ func TestIssueLeaseAuthorityClassification(t *testing.T) {
+ 			if tt.err == nil {
+ 				assert.Equal(t, tt.binding, binding)
+ 			}
+-			_, err = claimBinding(ctx, wrapped, project.ID)
++			_, _, err = claimAuthority(ctx, wrapped, project.ID)
+ 			if tt.actionStatus == 0 {
+ 				require.NoError(t, err)
+ 			} else {
+ 				assertClaimGateHelperAPIError(t, err, tt.actionStatus, tt.actionCode)
+ 				assert.Contains(t, err.Error(), tt.actionMessage)
+ 			}
+-			err = requireHubClaimBinding(ctx, wrapped, project.ID)
++			err = requireLocalClaimAuthority(ctx, wrapped, project.ID)
+ 			if tt.forceStatus == 0 {
+ 				require.NoError(t, err)
+ 			} else {
+@@ -68,9 +68,9 @@ func TestIssueLeaseAuthorityRejectsLookupFailureAndArchivedProject(t *testing.T)
+ 	wrapped := leaseAuthorityTestStore{Storage: store, err: errors.New("lookup failed")}
+ 	_, _, err := resolveIssueLeaseAuthority(ctx, wrapped, project.ID)
+ 	require.Error(t, err)
+-	_, err = claimBinding(ctx, wrapped, project.ID)
++	_, _, err = claimAuthority(ctx, wrapped, project.ID)
+ 	require.Error(t, err)
+-	require.Error(t, requireHubClaimBinding(ctx, wrapped, project.ID))
++	require.Error(t, requireLocalClaimAuthority(ctx, wrapped, project.ID))
+ 	_, _, err = store.RemoveProject(ctx, db.RemoveProjectParams{ProjectID: project.ID, Actor: "tester", Force: true})
+ 	require.NoError(t, err)
+ 	_, _, err = resolveIssueLeaseAuthority(ctx, store, project.ID)
+diff --git a/internal/db/dbtest/conformance.go b/internal/db/dbtest/conformance.go
+index 8d8f5b7..514b0a2 100644
+--- a/internal/db/dbtest/conformance.go
++++ b/internal/db/dbtest/conformance.go
+@@ -327,6 +327,15 @@ var storageScenarios = []scenario{
+ 		},
+ 		run: checkClaimLeaseLifecycle,
+ 	},
++	{
++		name: "claim lazy expiry project isolation",
++		methods: []string{
++			"AcquireClaim", "ApplyClaimStatus", "ClaimStatus", "ClaimStatusReadOnly",
++			"CreateIssue", "CreateProject", "EnableProjectFederation", "EventsAfter",
++			"ForceReleaseClaim", "MaxEventID", "ReleaseClaim", "RenewClaim", "UpsertFederationBinding",
++		},
++		runWithBackend: checkClaimLazyExpiryProjectIsolation,
++	},
+ 	{
+ 		name: "pending claim and cache lifecycle",
+ 		methods: []string{
+diff --git a/internal/db/dbtest/conformance_claims_expiry.go b/internal/db/dbtest/conformance_claims_expiry.go
+new file mode 100644
+index 0000000..7988fda
+--- /dev/null
++++ b/internal/db/dbtest/conformance_claims_expiry.go
+@@ -0,0 +1,183 @@
++package dbtest
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/db"
++	"go.kenn.io/kata/internal/uid"
++)
++
++// Issue-scoped claim operations may expire other claims in the resolved project,
++// but must leave every other project's authoritative or cached claims untouched.
++func checkClaimLazyExpiryProjectIsolation(t *testing.T, _ db.Storage, backend Backend) error {
++	t.Helper()
++	for _, role := range []string{"standalone", "hub"} {
++		t.Run(role, func(t *testing.T) {
++			for _, operation := range []string{"acquire", "renew", "release", "force", "status"} {
++				t.Run(operation, func(t *testing.T) {
++					store := backend.Open(t)
++					t.Cleanup(func() { require.NoError(t, store.Close()) })
++					checkClaimLazyExpiryOperation(t, store, role, operation)
++				})
++			}
++		})
++	}
++	return nil
++}
++
++func checkClaimLazyExpiryOperation(t *testing.T, store db.Storage, role, operation string) {
++	t.Helper()
++	ctx := context.Background()
++	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
++	operationAt := now.Add(2 * time.Hour)
++	principal := db.ClaimPrincipal{
++		HolderInstanceUID: store.InstanceUID(), Holder: "worker", ClientKind: "agent",
++	}
++	targetProject, err := store.CreateProject(ctx, "target-project")
++	require.NoError(t, err)
++	spokeProject, err := store.CreateProject(ctx, "spoke-project")
++	require.NoError(t, err)
++	otherProject, err := store.CreateProject(ctx, "other-authoritative-project")
++	require.NoError(t, err)
++	if role == "hub" {
++		_, err = store.EnableProjectFederation(ctx, targetProject.ID, "operator")
++	} else {
++		// Also exclude an unrelated authoritative project of the opposite role.
++		_, err = store.EnableProjectFederation(ctx, otherProject.ID, "operator")
++	}
++	require.NoError(t, err)
++	createIssue := func(project db.Project, title string) db.Issue {
++		t.Helper()
++		issue, _, err := store.CreateIssue(ctx, db.CreateIssueParams{
++			ProjectID: project.ID, Title: title, Author: "worker",
++		})
++		require.NoError(t, err)
++		return issue
++	}
++	target := createIssue(targetProject, "target claim operation")
++	sameProject := createIssue(targetProject, "expired claim in target project")
++	spoke := createIssue(spokeProject, "expired cached claim")
++	other := createIssue(otherProject, "expired authoritative claim elsewhere")
++	_, err = store.UpsertFederationBinding(ctx, db.FederationBinding{
++		ProjectID: spokeProject.ID, Role: db.FederationRoleSpoke,
++		HubURL: "https://hub.example", HubProjectID: 42, HubProjectUID: spokeProject.UID,
++		Enabled: true,
++	})
++	require.NoError(t, err)
++	acquire := func(issue db.Issue, ttl time.Duration) {
++		t.Helper()
++		result, err := store.AcquireClaim(ctx, db.AcquireClaimParams{
++			ProjectID: issue.ProjectID, IssueRef: issue.UID, Principal: principal,
++			ClaimKind: "timed", TTL: ttl, Now: now,
++		})
++		require.NoError(t, err)
++		require.True(t, result.Granted)
++		require.Empty(t, result.Events, "fixture setup must not expire claims")
++	}
++	if operation != "acquire" {
++		acquire(target, 4*time.Hour)
++	}
++	acquire(sameProject, time.Hour)
++	acquire(other, time.Hour)
++
++	claimUID, err := uid.New()
++	require.NoError(t, err)
++	remoteInstanceUID, err := uid.New()
++	require.NoError(t, err)
++	remotePrincipal := db.ClaimPrincipal{
++		HolderInstanceUID: remoteInstanceUID, Holder: "remote-worker", ClientKind: "agent",
++	}
++	expiresAt := now.Add(time.Hour)
++	cachedClaim := db.IssueClaim{
++		ClaimUID: claimUID, IssueUID: spoke.UID, Holder: remotePrincipal.Holder,
++		HolderInstanceUID: remotePrincipal.HolderInstanceUID, ClientKind: remotePrincipal.ClientKind,
++		ClaimKind: "timed", Purpose: "cached from hub", AcquiredAt: now,
++		ExpiresAt: &expiresAt, UpdatedAt: now, Revision: 7,
++	}
++	require.NoError(t, store.ApplyClaimStatus(ctx, spokeProject.ID, spoke.UID, db.ClaimStatus{
++		Held: true, Holder: remotePrincipal, Claim: &cachedClaim, HubNow: now,
++	}))
++
++	// Read only, even with a post-expiry clock, so assertions cannot perform the
++	// very lazy expiry being tested or hide mutations of the spoke cache.
++	readStatus := func(issue db.Issue) db.ClaimStatus {
++		t.Helper()
++		status, err := store.ClaimStatusReadOnly(ctx, issue.ProjectID, issue.UID, operationAt)
++		require.NoError(t, err)
++		require.Empty(t, status.Events)
++		return status
++	}
++	spokeBefore := readStatus(spoke)
++	otherBefore := readStatus(other)
++	require.True(t, spokeBefore.Held)
++	require.True(t, otherBefore.Held)
++	require.True(t, readStatus(sameProject).Held)
++	before, err := store.MaxEventID(ctx)
++	require.NoError(t, err)
++
++	var result db.LeaseResult
++	var expiredEvents []db.Event
++	switch operation {
++	case "acquire":
++		result, err = store.AcquireClaim(ctx, db.AcquireClaimParams{
++			ProjectID: targetProject.ID, IssueRef: target.ShortID, Principal: principal,
++			ClaimKind: "timed", TTL: time.Hour, Now: operationAt,
++		})
++	case "renew":
++		result, err = store.RenewClaim(ctx, db.RenewClaimParams{
++			ProjectID: targetProject.ID, IssueRef: target.ShortID, Principal: principal,
++			TTL: 3 * time.Hour, Now: operationAt,
++		})
++	case "release":
++		result, err = store.ReleaseClaim(ctx, db.ReleaseClaimParams{
++			ProjectID: targetProject.ID, IssueRef: target.ShortID, Principal: principal,
++			Reason: "complete", Now: operationAt,
++		})
++	case "force":
++		result, err = store.ForceReleaseClaim(ctx, db.ForceReleaseClaimParams{
++			ProjectID: targetProject.ID, IssueRef: target.ShortID, Actor: "operator",
++			Reason: "handoff", Now: operationAt,
++		})
++	case "status":
++		var status db.ClaimStatus
++		status, err = store.ClaimStatus(ctx, targetProject.ID, target.ShortID, operationAt)
++		assert.True(t, status.Held)
++		expiredEvents = status.Events
++	default:
++		t.Fatalf("unknown claim operation %q", operation)
++	}
++	require.NoError(t, err)
++	if operation != "status" {
++		assert.True(t, result.Granted)
++		expiredEvents = result.Events
++	}
++
++	assert.False(t, readStatus(sameProject).Held, "other expired claim in target project must be cleared")
++	assert.Equal(t, spokeBefore, readStatus(spoke), "spoke cache must remain unchanged")
++	assert.Equal(t, otherBefore, readStatus(other), "unrelated authoritative claim must remain unchanged")
++	assert.Len(t, expiredEvents, 1, "only the target project's expiry event may be returned")
++	var returnedUIDs []string
++	for _, event := range expiredEvents {
++		assert.Equal(t, "claim.expired", event.Type)
++		assert.Equal(t, "system", event.Actor)
++		assert.Equal(t, targetProject.ID, event.ProjectID)
++		assert.Equal(t, &sameProject.UID, event.IssueUID)
++		returnedUIDs = append(returnedUIDs, event.UID)
++	}
++	events, err := store.EventsAfter(ctx, db.EventsAfterParams{AfterID: before, Limit: 100})
++	require.NoError(t, err)
++	var persistedUIDs []string
++	for _, event := range events {
++		assert.Equal(t, targetProject.ID, event.ProjectID, "no event may be written in other projects")
++		if event.Type == "claim.expired" {
++			assert.Equal(t, &sameProject.UID, event.IssueUID)
++			persistedUIDs = append(persistedUIDs, event.UID)
++		}
++	}
++	assert.Len(t, persistedUIDs, 1, "exactly one same-project expiry must be persisted")
++	assert.Equal(t, returnedUIDs, persistedUIDs, "returned expiry must be the durable event")
++}
+diff --git a/internal/db/pgstore/claims_core.go b/internal/db/pgstore/claims_core.go
+index 12bfa5b..fa775ca 100644
+--- a/internal/db/pgstore/claims_core.go
++++ b/internal/db/pgstore/claims_core.go
+@@ -19,6 +19,7 @@ const claimSelect = `SELECT id, claim_uid, project_id, issue_id, issue_uid,
+   FROM issue_claims`
+ 
+ // AcquireClaim creates a live issue claim or reports the current holder.
++// Timed-claim expiry is limited to the resolved issue's project.
+ func (s *Store) AcquireClaim(ctx context.Context, input db.AcquireClaimParams) (db.LeaseResult, error) {
+ 	now := db.ClaimNow(input.Now)
+ 	if err := db.ValidateClaimPrincipal(input.Principal); err != nil {
+@@ -43,7 +44,7 @@ func (s *Store) AcquireClaim(ctx context.Context, input db.AcquireClaimParams) (
+ 		if err != nil {
+ 			return err
+ 		}
+-		expired, err := s.expireTimedClaimsTx(ctx, tx, 0, now, 0)
++		expired, err := s.expireTimedClaimsTx(ctx, tx, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -92,6 +93,7 @@ func (s *Store) AcquireClaim(ctx context.Context, input db.AcquireClaimParams) (
+ }
+ 
+ // RenewClaim extends a timed claim held by the exact principal.
++// Timed-claim expiry is limited to the resolved issue's project.
+ func (s *Store) RenewClaim(ctx context.Context, input db.RenewClaimParams) (db.LeaseResult, error) {
+ 	return s.renewClaim(ctx, input, s.withSerializableTx)
+ }
+@@ -121,7 +123,7 @@ func (s *Store) renewClaim(
+ 		if err != nil && !errors.Is(err, db.ErrNotFound) {
+ 			return err
+ 		}
+-		expiredEvents, err := s.expireTimedClaimsTx(ctx, tx, 0, now, 0)
++		expiredEvents, err := s.expireTimedClaimsTx(ctx, tx, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -169,6 +171,7 @@ SET expires_at=$1, revision=revision+1, updated_at=$2 WHERE id=$3`,
+ }
+ 
+ // ReleaseClaim releases a live claim held by the exact principal.
++// Timed-claim expiry is limited to the resolved issue's project.
+ func (s *Store) ReleaseClaim(ctx context.Context, input db.ReleaseClaimParams) (db.LeaseResult, error) {
+ 	if err := db.ValidateClaimPrincipal(input.Principal); err != nil {
+ 		return db.LeaseResult{}, err
+@@ -178,6 +181,7 @@ func (s *Store) ReleaseClaim(ctx context.Context, input db.ReleaseClaimParams) (
+ }
+ 
+ // ForceReleaseClaim releases a live claim regardless of its holder.
++// Timed-claim expiry is limited to the resolved issue's project.
+ func (s *Store) ForceReleaseClaim(ctx context.Context, input db.ForceReleaseClaimParams) (db.LeaseResult, error) {
+ 	if strings.TrimSpace(input.Actor) == "" {
+ 		return db.LeaseResult{}, fmt.Errorf("%w: actor is required", db.ErrClaimValidation)
+@@ -211,7 +215,7 @@ func (s *Store) releaseClaim(
+ 		if err != nil && !errors.Is(err, db.ErrNotFound) {
+ 			return err
+ 		}
+-		expiredEvents, err := s.expireTimedClaimsTx(ctx, tx, 0, now, 0)
++		expiredEvents, err := s.expireTimedClaimsTx(ctx, tx, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -258,7 +262,8 @@ func (s *Store) releaseClaim(
+ 	return output, err
+ }
+ 
+-// ClaimStatus returns the live claim after expiring timed claims.
++// ClaimStatus returns the live claim after expiring timed claims only in the
++// resolved issue's project.
+ func (s *Store) ClaimStatus(ctx context.Context, projectID int64, issueRef string, nowInput time.Time) (db.ClaimStatus, error) {
+ 	now := db.ClaimNow(nowInput)
+ 	output := db.ClaimStatus{HubNow: now}
+@@ -268,7 +273,7 @@ func (s *Store) ClaimStatus(ctx context.Context, projectID int64, issueRef strin
+ 		if err != nil {
+ 			return err
+ 		}
+-		events, err := s.expireTimedClaimsTx(ctx, tx, 0, now, 0)
++		events, err := s.expireTimedClaimsTx(ctx, tx, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -318,6 +323,7 @@ func (s *Store) ExpireTimedClaims(ctx context.Context, now time.Time, limit int)
+ }
+ 
+ // ExpireTimedClaimsForProject releases expired claims in one project.
++// The caller must ensure this instance is authoritative for that project.
+ func (s *Store) ExpireTimedClaimsForProject(ctx context.Context, projectID int64, now time.Time, limit int) ([]db.Event, error) {
+ 	var events []db.Event
+ 	err := s.withSerializableTx(ctx, func(tx *sql.Tx) error {
+diff --git a/internal/db/sqlitestore/claims.go b/internal/db/sqlitestore/claims.go
+index c2e05c5..cea6a1d 100644
+--- a/internal/db/sqlitestore/claims.go
++++ b/internal/db/sqlitestore/claims.go
+@@ -21,7 +21,8 @@ type claimStore interface {
+ }
+ 
+ // AcquireClaim creates a live claim for an issue, or returns the current live
+-// holder when arbitration denies the request.
++// holder when arbitration denies the request. Timed-claim expiry is limited to
++// the resolved issue's project.
+ func (d *Store) AcquireClaim(ctx context.Context, p db.AcquireClaimParams) (db.LeaseResult, error) {
+ 	now := claimNow(p.Now)
+ 	if err := validateClaimPrincipal(p.Principal); err != nil {
+@@ -45,7 +46,7 @@ func (d *Store) AcquireClaim(ctx context.Context, p db.AcquireClaimParams) (db.L
+ 		if err != nil {
+ 			return leaseOutcome{}, err
+ 		}
+-		expiredEvents, err := d.expireTimedClaimsTx(ctx, conn, now, 0)
++		expiredEvents, err := d.expireTimedClaimsForProjectTx(ctx, conn, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return leaseOutcome{}, err
+ 		}
+@@ -106,6 +107,7 @@ func (d *Store) AcquireClaim(ctx context.Context, p db.AcquireClaimParams) (db.L
+ }
+ 
+ // RenewClaim extends a live timed claim held by the same principal.
++// Timed-claim expiry is limited to the resolved issue's project.
+ func (d *Store) RenewClaim(ctx context.Context, p db.RenewClaimParams) (db.LeaseResult, error) {
+ 	now := claimNow(p.Now)
+ 	if err := validateClaimPrincipal(p.Principal); err != nil {
+@@ -125,7 +127,7 @@ func (d *Store) RenewClaim(ctx context.Context, p db.RenewClaimParams) (db.Lease
+ 		if err != nil && !errors.Is(err, db.ErrNotFound) {
+ 			return leaseOutcome{}, err
+ 		}
+-		expiredEvents, err := d.expireTimedClaimsTx(ctx, conn, now, 0)
++		expiredEvents, err := d.expireTimedClaimsForProjectTx(ctx, conn, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return leaseOutcome{}, err
+ 		}
+@@ -171,6 +173,7 @@ func (d *Store) RenewClaim(ctx context.Context, p db.RenewClaimParams) (db.Lease
+ }
+ 
+ // ReleaseClaim releases a live claim only when the requester is the holder.
++// Timed-claim expiry is limited to the resolved issue's project.
+ func (d *Store) ReleaseClaim(ctx context.Context, p db.ReleaseClaimParams) (db.LeaseResult, error) {
+ 	now := claimNow(p.Now)
+ 	if err := validateClaimPrincipal(p.Principal); err != nil {
+@@ -187,7 +190,7 @@ func (d *Store) ReleaseClaim(ctx context.Context, p db.ReleaseClaimParams) (db.L
+ 		if err != nil && !errors.Is(err, db.ErrNotFound) {
+ 			return leaseOutcome{}, err
+ 		}
+-		expiredEvents, err := d.expireTimedClaimsTx(ctx, conn, now, 0)
++		expiredEvents, err := d.expireTimedClaimsForProjectTx(ctx, conn, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return leaseOutcome{}, err
+ 		}
+@@ -224,7 +227,8 @@ func (d *Store) ReleaseClaim(ctx context.Context, p db.ReleaseClaimParams) (db.L
+ }
+ 
+ // ForceReleaseClaim releases any live claim for the issue. Authorization is
+-// intentionally enforced above this DB helper.
++// intentionally enforced above this DB helper. Timed-claim expiry is limited to
++// the resolved issue's project.
+ func (d *Store) ForceReleaseClaim(ctx context.Context, p db.ForceReleaseClaimParams) (db.LeaseResult, error) {
+ 	now := claimNow(p.Now)
+ 	if strings.TrimSpace(p.Actor) == "" {
+@@ -241,7 +245,7 @@ func (d *Store) ForceReleaseClaim(ctx context.Context, p db.ForceReleaseClaimPar
+ 		if err != nil && !errors.Is(err, db.ErrNotFound) {
+ 			return leaseOutcome{}, err
+ 		}
+-		expiredEvents, err := d.expireTimedClaimsTx(ctx, conn, now, 0)
++		expiredEvents, err := d.expireTimedClaimsForProjectTx(ctx, conn, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return leaseOutcome{}, err
+ 		}
+@@ -273,7 +277,8 @@ func (d *Store) ForceReleaseClaim(ctx context.Context, p db.ForceReleaseClaimPar
+ 	})
+ }
+ 
+-// ClaimStatus returns the live claim after expiring stale timed claims.
++// ClaimStatus returns the live claim after expiring stale timed claims only in
++// the resolved issue's project.
+ func (d *Store) ClaimStatus(ctx context.Context, projectID int64, issueRef string, now time.Time) (db.ClaimStatus, error) {
+ 	now = claimNow(now)
+ 	out := db.ClaimStatus{HubNow: now}
+@@ -282,7 +287,7 @@ func (d *Store) ClaimStatus(ctx context.Context, projectID int64, issueRef strin
+ 		if err != nil {
+ 			return err
+ 		}
+-		expiredEvents, err := d.expireTimedClaimsTx(ctx, conn, now, 0)
++		expiredEvents, err := d.expireTimedClaimsForProjectTx(ctx, conn, issue.ProjectID, now, 0)
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -739,6 +744,7 @@ func (d *Store) ExpireTimedClaims(ctx context.Context, now time.Time, limit int)
+ }
+ 
+ // ExpireTimedClaimsForProject releases stale timed claims for one project.
++// The caller must ensure this instance is authoritative for that project.
+ func (d *Store) ExpireTimedClaimsForProject(ctx context.Context, projectID int64, now time.Time, limit int) ([]db.Event, error) {
+ 	now = claimNow(now)
+ 	var out []db.Event
+-- 
+2.50.1 (Apple Git-155)
+

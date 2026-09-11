@@ -1,0 +1,163 @@
+From f837be050f56b7c4f18d21643d195421a9a8fd0a Mon Sep 17 00:00:00 2001
+From: rkbkosp <whitemousehuang@gmail.com>
+Date: Fri, 11 Sep 2026 09:17:55 +0800
+Subject: [PATCH 4/8] feat: sweep authoritative standalone timed leases
+
+---
+ internal/daemon/claims_sweeper.go             | 38 +++++++-----
+ .../daemon/claims_sweeper_authority_test.go   | 62 +++++++++++++++++++
+ 2 files changed, 86 insertions(+), 14 deletions(-)
+ create mode 100644 internal/daemon/claims_sweeper_authority_test.go
+
+diff --git a/internal/daemon/claims_sweeper.go b/internal/daemon/claims_sweeper.go
+index a595235..d093d2d 100644
+--- a/internal/daemon/claims_sweeper.go
++++ b/internal/daemon/claims_sweeper.go
+@@ -14,7 +14,7 @@ const (
+ 	defaultTimedClaimSweepLimit    = 100
+ )
+ 
+-// TimedClaimSweeper expires authoritative hub timed claims and fans emitted
++// TimedClaimSweeper expires authoritative standalone/hub timed claims and fans emitted
+ // claim.expired events out through the daemon's normal event surfaces.
+ type TimedClaimSweeper struct {
+ 	DB            db.Storage
+@@ -31,7 +31,7 @@ func NewTimedClaimSweeper(store db.Storage, publisher EventPublisher) *TimedClai
+ 	return &TimedClaimSweeper{DB: store, Publish: publisher}
+ }
+ 
+-// RunOnce expires timed claims for all enabled hub bindings once.
++// RunOnce expires timed claims for active standalone and enabled hub projects.
+ func (s *TimedClaimSweeper) RunOnce(ctx context.Context, now time.Time) error {
+ 	_, _, err := s.runOnce(ctx, now)
+ 	return err
+@@ -52,7 +52,7 @@ func (s *TimedClaimSweeper) runOnce(ctx context.Context, now time.Time) (<-chan
+ 	if idleLease != nil {
+ 		fork = idleLease.Fork
+ 	}
+-	bindings, err := s.DB.ListFederationBindings(ctx)
++	projects, err := s.DB.ListProjects(ctx)
+ 	if err != nil {
+ 		return nil, false, err
+ 	}
+@@ -61,28 +61,38 @@ func (s *TimedClaimSweeper) runOnce(ctx context.Context, now time.Time) (<-chan
+ 		limit = defaultTimedClaimSweepLimit
+ 	}
+ 	var errs []error
+-	for _, binding := range bindings {
+-		if !binding.Enabled || binding.Role != db.FederationRoleHub {
+-			continue
+-		}
+-		project, err := s.DB.ProjectByID(ctx, binding.ProjectID)
+-		if err != nil {
+-			errs = append(errs, err)
+-			continue
+-		}
++	for _, project := range projects {
+ 		if project.DeletedAt != nil {
+ 			continue
+ 		}
+-		events, err := s.DB.ExpireTimedClaimsForProject(ctx, binding.ProjectID, now, limit)
++		events, err := s.expireAuthoritativeProject(ctx, project.ID, now, limit)
+ 		if err != nil {
+ 			errs = append(errs, err)
+ 			continue
+ 		}
+-		s.Publish.EventsFrom(binding.ProjectID, events, fork)
++		s.Publish.EventsFrom(project.ID, events, fork)
+ 	}
+ 	return nil, false, errors.Join(errs...)
+ }
+ 
++func (s *TimedClaimSweeper) expireAuthoritativeProject(ctx context.Context, projectID int64, now time.Time, limit int) ([]db.Event, error) {
++	// Serialize classification and expiry with federation endpoint transitions;
++	// a spoke's cache must not become a sweep target from an outdated snapshot.
++	finish, err := beginClaimFederationTransport(ctx, ServerConfig{DB: s.DB}, projectID)
++	if err != nil {
++		return nil, err
++	}
++	defer finish()
++	authority, _, err := resolveIssueLeaseAuthority(ctx, s.DB, projectID)
++	if err != nil {
++		return nil, err
++	}
++	if authority != leaseAuthorityStandalone && authority != leaseAuthorityHub {
++		return nil, nil
++	}
++	return s.DB.ExpireTimedClaimsForProject(ctx, projectID, now, limit)
++}
++
+ // Run expires timed claims on a ticker until the context is canceled.
+ func (s *TimedClaimSweeper) Run(ctx context.Context) error {
+ 	interval := s.Interval
+diff --git a/internal/daemon/claims_sweeper_authority_test.go b/internal/daemon/claims_sweeper_authority_test.go
+new file mode 100644
+index 0000000..d600c72
+--- /dev/null
++++ b/internal/daemon/claims_sweeper_authority_test.go
+@@ -0,0 +1,62 @@
++package daemon_test
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	"go.kenn.io/kata/internal/daemon"
++	"go.kenn.io/kata/internal/db"
++	"go.kenn.io/kata/internal/testenv"
++)
++
++func TestTimedClaimSweeperAuthority(t *testing.T) {
++	for _, role := range []string{"standalone", "hub", "spoke", "disabled", "archived"} {
++		t.Run(role, func(t *testing.T) {
++			ctx := context.Background()
++			env := testenv.New(t)
++			project, issue := createStandaloneClaimIssue(t, env)
++			now := time.Now().UTC()
++			if role == "hub" || role == "disabled" {
++				_, err := env.DB.EnableProjectFederation(ctx, project.ID, "operator")
++				require.NoError(t, err)
++				if role == "disabled" {
++					binding, err := env.DB.FederationBindingByProject(ctx, project.ID)
++					require.NoError(t, err)
++					binding.Enabled = false
++					_, err = env.DB.UpsertFederationBinding(ctx, binding)
++					require.NoError(t, err)
++				}
++			}
++			if role == "spoke" {
++				_, err := env.DB.UpsertFederationBinding(ctx, db.FederationBinding{ProjectID: project.ID, Role: db.FederationRoleSpoke, HubURL: "https://hub.example", HubProjectID: 42, HubProjectUID: project.UID, Enabled: true})
++				require.NoError(t, err)
++			}
++			acquired, err := env.DB.AcquireClaim(ctx, db.AcquireClaimParams{ProjectID: project.ID, IssueRef: issue.UID, Principal: db.ClaimPrincipal{Holder: "worker", HolderInstanceUID: env.DB.InstanceUID(), ClientKind: "agent"}, ClaimKind: "timed", TTL: time.Minute, Now: now.Add(-2 * time.Minute)})
++			require.NoError(t, err)
++			require.NotNil(t, acquired.Claim)
++			if role == "archived" {
++				_, _, err = env.DB.RemoveProject(ctx, db.RemoveProjectParams{ProjectID: project.ID, Actor: "operator", Force: true})
++				require.NoError(t, err)
++			}
++			sink := &captureHookSink{}
++			sweeper := daemon.NewTimedClaimSweeper(env.DB, daemon.NewEventPublisher(nil, sink))
++			require.NoError(t, sweeper.RunOnce(ctx, now))
++			var released bool
++			require.NoError(t, env.DB.QueryRowContext(ctx, `SELECT released_at IS NOT NULL FROM issue_claims WHERE claim_uid = ?`, acquired.Claim.ClaimUID).Scan(&released))
++			authoritative := role == "standalone" || role == "hub"
++			assert.Equal(t, authoritative, released)
++			if authoritative {
++				require.Len(t, sink.events, 1)
++				assert.Equal(t, "claim.expired", sink.events[0].Type)
++				assert.Equal(t, project.ID, sink.events[0].ProjectID)
++				require.NoError(t, sweeper.RunOnce(ctx, now))
++				assert.Len(t, sink.events, 1, "expiry emitted once")
++			} else {
++				assert.Empty(t, sink.events)
++			}
++		})
++	}
++}
+-- 
+2.50.1 (Apple Git-155)
+

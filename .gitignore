@@ -1,0 +1,7 @@
+/kata/
+/.pi/
+/.forge/
+/bin/
+/node_modules/
+/extensions/node_modules/
+*.test

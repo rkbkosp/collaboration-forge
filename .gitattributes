@@ -1,0 +1,2 @@
+# format-patch context prefixes and mail trailers contain intentional whitespace.
+patches/kata/*.patch -whitespace

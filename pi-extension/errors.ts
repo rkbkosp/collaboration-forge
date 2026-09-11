@@ -48,7 +48,9 @@ export function errorCode(value: unknown, fallback = "remote_error"): string {
 
 export function errorMessage(error: Pick<ForgeErrorLike, "code" | "message">): string {
   const prefix = `${error.code}: `;
-  return error.message.startsWith(prefix) ? error.message.slice(prefix.length) : error.message;
+  let message = error.message;
+  while (message.startsWith(prefix)) message = message.slice(prefix.length);
+  return message;
 }
 
 const secretKey = /^(?:authorization|bearer|execution[_-]?token|worker[_-]?token|x-forge-execution|token)$/i;

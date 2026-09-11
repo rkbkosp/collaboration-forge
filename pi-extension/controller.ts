@@ -245,7 +245,8 @@ export class Controller {
   #safeMessage(error: unknown): string {
     if (!(error instanceof ForgeError)) return "Forge operation unavailable; stop editing and retry after checking connectivity";
     const prefix = `${error.code}: `;
-    const message = error.message.startsWith(prefix) ? error.message.slice(prefix.length) : error.message;
+    let message = error.message;
+    while (message.startsWith(prefix)) message = message.slice(prefix.length);
     return this.sanitize(message);
   }
   #stop(reason: string, lost = false) {

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { register } from 'tsx/esm/api';
-register();
+// Load Forge dependencies independently of the target workspace path aliases.
+register({tsconfig:false});
 if(process.argv[2]==='codex'){
  const {codexCommand}=await import('../codex/cli.ts');
  process.exitCode=await codexCommand(process.argv.slice(3));

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { register } from 'tsx/esm/api';
-register();
+// Load Forge dependencies independently of the target workspace path aliases.
+register({tsconfig:false});
 const {handleHook}=await import('../codex/hooks.ts');
 try {
  let input='';for await(const b of process.stdin){input+=b;if(Buffer.byteLength(input)>1048576)throw new Error();}

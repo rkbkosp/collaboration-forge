@@ -1,5 +1,11 @@
 # 实施修订（C1–C12 核验后，以本节为准）
 
+## 最新验收（2026-09-11）
+
+K1–K8、F1–F7 已实现并独立提交；root Go 全量/race/build/vet、Node 24 tests/typecheck、真实 forged/controller 与 Pi SDK 7 tests、patch bootstrap 均通过。用 `scripts/test-kata.sh` 修正长 TMPDIR、Web 构建依赖及逐测试 PG 容器成本后，Kata 完整 suite 已通过，真实 PostgreSQL 全包无 skip。
+
+完整范围与限制见 [生产就绪边界](docs/production-readiness.md)。结论只支持受监督、可信本机试运行；未声称完整 LLM/TUI 回合、恶意 Agent 沙箱或通用生产就绪。下列早期 K1/K2 验证记录是历史快照，其“尚未取得全包结果”已由本次完整重跑取代。
+
 上游固定基线：`kenn-io/kata@b1667be5603a308f8c2d44a0d6cbac2463a7eeb2`。
 K1 已完成：`17b335c refactor: classify issue lease authority`。
 K2 已完成：`c10bd13 feat: enable standalone lease actions with project-scoped expiry`。

@@ -46,15 +46,16 @@ it never falls back to unauthenticated mode or generates credentials itself.
 
 ```sh
 curl --fail http://127.0.0.1:7347/health
-TOKEN="$(tr -d '\r\n' < .forge/admin-token)"
-curl --fail -H "Authorization: Bearer $TOKEN" \
+# Supervisor terminal only; pass the credential over stdin, not argv/history.
+forge_auth() { printf 'Authorization: Bearer '; tr -d '\r\n' < .forge/admin-token; printf '\n'; }
+forge_auth | curl --fail --header @- \
   http://127.0.0.1:7347/api/v1/projects
 # Use the project's numeric ID from the response:
-curl --fail -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+forge_auth | curl --fail --header @- -H 'Content-Type: application/json' \
   -d '{"title":"First issue","actor":"Human"}' \
   http://127.0.0.1:7347/api/v1/projects/PROJECT_ID/issues
 # The create response supplies short_id for GET .../issues/SHORT_ID.
-unset TOKEN
+unset -f forge_auth
 ```
 
 ## Pi extension
@@ -73,6 +74,10 @@ comment, create issues and add links. New runtimes never restore an old executio
 from Pi history. Unknown/lost lease state blocks stock editing tools. See
 [extension setup and lifecycle](extensions/README.md), including the limits of
 cooperative filesystem preflight and exact retry rules after an uncertain close.
+This same-account example is for trusted local use, **not an agent sandbox**:
+0600 does not stop another process under the same UID from reading token files.
+Keep supervisor credentials outside the worker's filesystem access if workers
+are untrusted; server role separation cannot compensate for a stolen admin token.
 
 ## Human timeline
 
@@ -114,3 +119,13 @@ go build ./...
 ```
 
 These commands test/build the root module, not Kata's full test suite.
+
+```sh
+npm ci && npm test && npm run typecheck
+npm run test:e2e             # real forged/Pi SDK; includes a real ~60s expiry
+./scripts/test-bootstrap-kata.sh
+./scripts/test-kata.sh       # full Kata suite; requires Docker + Bun
+```
+
+See [acceptance evidence and production boundaries](docs/production-readiness.md).
+The current target is supervised, trusted local use—not unrestricted production.

@@ -3,9 +3,11 @@ package checkout
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"testing"
 )
 
@@ -161,5 +163,52 @@ func TestConcurrentSourceChangeRejectsSnapshot(t *testing.T) {
 	files, _ := os.ReadDir(store)
 	if len(files) != 0 {
 		t.Fatal("published failed snapshot")
+	}
+}
+
+func TestCredentialMarkerDoesNotRejectSourceCodeMention(t *testing.T) {
+	if sensitive(Entry{Path: "source.go", Data: []byte(`var marker = "-----BEGIN PRIVATE KEY-----"`)}) {
+		t.Fatal("source string mistaken for a key")
+	}
+	if !sensitive(Entry{Path: "key.txt", Data: []byte("-----BEGIN PRIVATE KEY-----\nencoded\n")}) {
+		t.Fatal("private key marker accepted")
+	}
+}
+func TestSnapshotStoreInsideSourceIsRejectedWithoutCreatingIt(t *testing.T) {
+	d := seed(t)
+	store := filepath.Join(d, "new-store")
+	if _, e := Capture(context.Background(), Options{Source: d, Store: store, Dirty: true}); e == nil {
+		t.Fatal("in-source store accepted")
+	}
+	if _, e := os.Stat(store); !os.IsNotExist(e) {
+		t.Fatal("created source directory before refusing")
+	}
+}
+
+func TestRestoreRefusesFilesystemPathAliasing(t *testing.T) {
+	d := seed(t)
+	s, e := Capture(context.Background(), Options{Source: d, Store: t.TempDir(), Dirty: true})
+	if e != nil {
+		t.Fatal(e)
+	}
+	m := s.Manifest
+	m.Work = append(m.Work, Entry{Path: "A", Mode: "100644", Data: []byte("base\n")})
+	sort.Slice(m.Work, func(i, j int) bool { return m.Work[i].Path < m.Work[j].Path })
+	raw, _ := json.Marshal(m)
+	store := t.TempDir()
+	artifact := filepath.Join(store, digest(raw))
+	os.Mkdir(artifact, 0700)
+	os.WriteFile(filepath.Join(artifact, "manifest.json"), raw, 0600)
+	bundle, _ := os.ReadFile(filepath.Join(s.Path, "base.bundle"))
+	os.WriteFile(filepath.Join(artifact, "base.bundle"), bundle, 0600)
+	probe := t.TempDir()
+	os.WriteFile(filepath.Join(probe, "a"), []byte("x"), 0600)
+	_, aliasErr := os.Stat(filepath.Join(probe, "A"))
+	_, e = Restore(context.Background(), artifact, filepath.Join(probe, "execution"), "forge/case")
+	if aliasErr == nil && e == nil {
+		t.Fatal("case-aliasing filesystem accepted distinct paths")
+	}
+	if os.IsNotExist(aliasErr) && e != nil {
+		t.Fatal(e)
 	}
 }

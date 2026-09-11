@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -93,12 +94,15 @@ func safeEntry(e Entry) error {
 	}
 	return nil
 }
+
+var privateKeyMarker = regexp.MustCompile(`(?m)^-----BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY-----\r?$`)
+
 func sensitive(e Entry) bool {
 	name := strings.ToLower(filepath.Base(e.Path))
 	if name == ".env" || strings.HasPrefix(name, ".env.") || name == "id_rsa" || name == "id_ed25519" || name == "credentials" || strings.HasSuffix(name, ".pem") || strings.HasSuffix(name, ".key") {
 		return true
 	}
-	return bytes.Contains(e.Data, []byte("-----BEGIN PRIVATE KEY-----")) || bytes.Contains(e.Data, []byte("-----BEGIN OPENSSH PRIVATE KEY-----")) || bytes.Contains(e.Data, []byte("-----BEGIN RSA PRIVATE KEY-----"))
+	return privateKeyMarker.Match(e.Data)
 }
 func split0(b []byte) []string {
 	s := strings.Split(string(b), "\x00")
@@ -415,6 +419,11 @@ func syncDir(p string) error {
 	return errors.Join(f.Sync(), f.Close())
 }
 func Load(path string) (Snapshot, error) {
+	var err error
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return Snapshot{}, err
+	}
 	a, e := readBounded(filepath.Join(path, "manifest.json"))
 	if e != nil {
 		return Snapshot{}, e
@@ -501,6 +510,30 @@ func Restore(ctx context.Context, snapshot, dest, branch string) (string, error)
 		}
 		if e != nil {
 			return "", e
+		}
+	}
+
+	// Case/Unicode-normalizing filesystems must not silently merge distinct paths.
+	names := map[string]map[string]bool{}
+	for _, v := range s.Manifest.Work {
+		parent := w
+		for _, component := range strings.Split(v.Path, "/") {
+			children, ok := names[parent]
+			if !ok {
+				children = map[string]bool{}
+				rows, err := os.ReadDir(parent)
+				if err != nil {
+					return "", err
+				}
+				for _, row := range rows {
+					children[row.Name()] = true
+				}
+				names[parent] = children
+			}
+			if !children[component] {
+				return "", errors.New("target filesystem cannot represent exact snapshot paths")
+			}
+			parent = filepath.Join(parent, component)
 		}
 	}
 	if _, e = git(ctx, w, nil, "read-tree", "--empty"); e != nil {

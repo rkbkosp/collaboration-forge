@@ -35,3 +35,25 @@ or inherit another worker's socket. Do not read, print or copy token files.
 
 This is trusted same-UID local coordination, not an OS sandbox or proof of work.
 The server restricts worker ledger mutations independently of hook availability.
+
+## Optional isolated worktrees
+
+Claim first, then either work in the original directory or run
+`forge checkout ISSUE --dirty --source REPO` / `forge checkout ISSUE --ref COMMIT --source REPO`.
+Choose the source explicitly; stop source writers for dirty capture. Repeat for
+each repository in a multi-repository Issue. Checkout reuses the current tenure.
+Wait for `state: ready`, then explicitly set each shell/edit/test tool's working
+directory or absolute paths to the returned worktree. A CLI cannot change the
+Agent's cwd. If login PATH overrides the runtime shim, use `"$FORGE_CODEX_CLI"`.
+
+Use `forge checkout list ISSUE` and `forge checkout status ID` to inspect jobs.
+After a confirmed Issue close, workspaces are archived in place without deleting
+files or branches. Archive is not a merge or proof that every change was committed.
+If `workspace_archive.state` is pending, close already succeeded: use
+`forge checkout archive ID`, not a new close. A preparing checkout blocks close.
+
+Pause, crash, release and restart preserve artifacts for explicit recovery.
+After a fresh claim, use `forge checkout ISSUE --recover OLD_ID --dirty` to copy
+retained progress into a new tree. Never restore an old execution or silently
+reuse another tenure's working directory. This requires the new server/CLI and
+an artifact root outside source repositories; older services cannot supply it.

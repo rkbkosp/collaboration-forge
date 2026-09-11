@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { workspaceShim } from './workspace-shim.ts';
 import { codexRPC } from './transport.ts';
 
 type Exit={code:number|null;signal:NodeJS.Signals|null};
@@ -26,7 +27,8 @@ export async function launchCodex(args:string[],env:NodeJS.ProcessEnv=process.en
  let registered=false;
  try{
   await writeFile(file,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});
-  await deps.register({instance_id:instance,pid:process.pid,...(env.FORGE_TTL_SECONDS?{ttl_seconds:Number(env.FORGE_TTL_SECONDS)}:{})},childEnv);registered=true;
+  const registration=await deps.register({instance_id:instance,pid:process.pid,...(env.FORGE_TTL_SECONDS?{ttl_seconds:Number(env.FORGE_TTL_SECONDS)}:{})},childEnv);registered=true;
+  await workspaceShim(dir,registration,childEnv);
   const result=await deps.run(env.FORGE_CODEX_BINARY??'codex',args,childEnv);
   await deps.end({instance_id:instance,normal:result.code===0&&result.signal===null},childEnv).catch(()=>{});
   registered=false;return result.code??1;

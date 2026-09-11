@@ -115,7 +115,8 @@ Use `forge codex` to launch Codex with a fresh runtime instance. Standard
 `forge issue` commands then use daemon-owned execution and automatic renewal;
 no background session broker is needed. Install/trust the command hooks for
 session/subagent context, compaction recovery, bounded Stop checks and cleanup.
-See [Codex setup, lifecycle and retry semantics](docs/codex.md).
+See [Codex setup, lifecycle and retry semantics](docs/codex.md) and
+[optional claimed-Issue worktrees](docs/codex-checkout.md).
 
 ## Pi extension
 

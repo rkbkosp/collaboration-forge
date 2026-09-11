@@ -31,6 +31,9 @@ including `forge codex resume THREAD` and `forge codex exec ...`.
 `FORGE_TTL_SECONDS` is fixed for each launched instance, default 300, range
 60–3600. Renewal runs at TTL/3 capped at 30 seconds. No CLI renewal subprocess.
 
+For optional per-Issue, multi-repository worktrees, see [Codex checkout](codex-checkout.md).
+Claim alone still works directly in the original directory.
+
 ## Agent workflow
 
 ```sh

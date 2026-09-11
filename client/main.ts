@@ -19,6 +19,8 @@ const HELP = `Forge client — JSON output; credentials are FILE paths, never to
 
 forge codex [Codex arguments...]  (daemon renewal + lifecycle hooks)
 forge codex --help-forge
+forge checkout ISSUE (--ref COMMIT | --dirty) [--source REPO]
+forge checkout list | status WORKSPACE_ID | archive WORKSPACE_ID
 forge health | project
 forge issue list [--status open|closed] [--limit N]
 forge issue get REF | graph REF [--depth 1..10]

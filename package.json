@@ -15,7 +15,9 @@
     "skills/collab-forge-client/",
     "pi-extension/direct-fetch.ts",
     "codex/",
-    "scripts/forge-codex-hook.mjs"
+    "scripts/forge-codex-hook.mjs",
+    "docs/codex.md",
+    "docs/codex-checkout.md"
   ],
   "engines": {
     "node": ">=22.19.0"
@@ -32,7 +34,9 @@
     "forge": "node scripts/forge.mjs",
     "test:codex": "tsx --test codex/*.test.ts",
     "test:codex-e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-e2e.test.ts",
-    "test:codex-live": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-live-smoke.test.ts"
+    "test:codex-live": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-live-smoke.test.ts",
+    "test:checkout-e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-checkout-e2e.test.ts",
+    "test:checkout-live": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-checkout-live.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.1",

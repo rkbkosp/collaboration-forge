@@ -45,8 +45,8 @@ func (h *toolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runtime := r.Header.Get("X-Forge-Session")
-	if len(r.Header.Values("X-Forge-Session")) != 1 || !toolUUIDv4(runtime) {
-		toolError(http.StatusBadRequest, "validation", "X-Forge-Session must be the Pi session UUIDv4").serve(w)
+	if len(r.Header.Values("X-Forge-Session")) != 1 || !toolUUID(runtime, "47") {
+		toolError(http.StatusBadRequest, "validation", "X-Forge-Session must be a Pi session UUIDv4 or UUIDv7").serve(w)
 		return
 	}
 	// A distinct execution Subject controls the lease. The display actor stays
@@ -326,8 +326,6 @@ func toolBoundedInt(value *int, fallback, min, max int) (int, bool) {
 	}
 	return *value, *value >= min && *value <= max
 }
-
-func toolUUIDv4(value string) bool { return toolUUID(value, "4") }
 
 func toolUUID(value, versions string) bool {
 	if len(value) != 36 || !strings.ContainsRune(versions, rune(value[14])) || !strings.ContainsRune("89aAbB", rune(value[19])) {

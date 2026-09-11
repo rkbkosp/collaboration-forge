@@ -81,7 +81,7 @@ cooperative filesystem preflight and exact retry rules after an uncertain close.
 # Optional: --url http://127.0.0.1:7347 --token-file /private/admin-token
 ```
 
-The terminal view reads Kata events: actor, comment, execution acquire/renew,
+The terminal view reads Kata events: actor, comment, execution acquire,
 links/dependencies, close reason and typed evidence, release/expiry. It does not
 create a second audit store. Pagination scans project events while filtering the
 issue and incoming relations. Purged history and page-limit truncation are

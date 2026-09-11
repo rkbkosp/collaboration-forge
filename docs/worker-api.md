@@ -1,7 +1,7 @@
 # Worker API
 
 Authenticate with the worker Bearer token and `X-Forge-Session` containing the
-real Pi session UUIDv4. The host configures one project; worker requests cannot
+real Pi session UUID (v4 or v7; Pi 0.85.1 creates v7 sessions). The host configures one project; worker requests cannot
 choose another project. All operations use `POST /forge/v1/tools/{name}` with a
 single JSON object, at most 1 MiB. Unknown fields are refused. Responses retain
 Kata's JSON, with bounded 8 MiB capture. Errors use `{status,error:{code,message}}`.

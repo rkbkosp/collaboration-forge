@@ -342,11 +342,9 @@ func TestToolsUUIDv7AttemptAndSameSessionNewExecution(t *testing.T) {
 	if firstSubject == nextSubject || firstClaim == nextClaim {
 		t.Fatal("new logical attempt reused old execution")
 	}
-	// Session IDs remain v4 even though logical-acquire attempts may be v7.
+	// Current Pi SessionManager emits UUIDv7; older v4 sessions remain valid.
 	w := toolsRequest(f.handler, "issue_list", toolsAttemptV7, "", `{}`)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("v7 session accepted: HTTP %d", w.Code)
-	}
+	toolsSuccess(t, w)
 }
 
 func TestToolsRejectUnsafeDTOsAndBounds(t *testing.T) {

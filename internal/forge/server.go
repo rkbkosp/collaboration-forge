@@ -50,6 +50,7 @@ type Server struct {
 	config    Config
 	handler   http.Handler
 	tools     http.Handler
+	codex     *codexRuntime
 	signer    executionSigner
 	lock      *os.File
 	cancel    context.CancelFunc
@@ -154,9 +155,14 @@ func New(cfg Config) (_ *Server, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{service: svc, project: result.Project, config: cfg, signer: signer, lock: lock, cancel: cancel, runDone: make(chan struct{})}
 	s.tools = newToolHandler(svc.Handler(), result.Project, signer)
+	s.codex = newCodexRuntime(s.tools)
 	s.handler = s.authenticatedHandler()
 	go func() {
+		codexDone := make(chan struct{})
+		go func() { s.codex.run(ctx); close(codexDone) }()
 		s.runErr = svc.Run(ctx)
+		cancel()
+		<-codexDone
 		close(s.runDone)
 	}()
 	return s, nil
@@ -208,6 +214,10 @@ func (s *Server) authenticatedHandler() http.Handler {
 		if r.Method == http.MethodGet && r.URL.Path == "/forge/v1/project" {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"project": map[string]any{"id": s.project.ID, "uid": s.project.UID, "name": s.project.Name}, "close_protocol": "close-v2"})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/forge/v1/codex/") && s.codex != nil {
+			s.codex.ServeHTTP(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/forge/v1/tools/") && s.tools != nil {

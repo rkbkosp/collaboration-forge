@@ -54,6 +54,9 @@ func (h *toolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// restore an old attempt into a new runtime, even for the same session.
 	session := h.signer.session(runtime)
 	principal := kata.Principal{Subject: "session:" + session, Actor: "Agent/" + session[:12]}
+	if _, ok := r.Context().Value(codexAttributionKey{}).(codexIdentity); ok {
+		principal.Actor = "Codex/" + session[:12]
+	}
 	h.invoke(w, r, strings.TrimPrefix(r.URL.Path, prefix), runtime, principal)
 }
 
@@ -171,6 +174,9 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 		// server-derived link to the same actor shown on comments and close,
 		// without exposing the private logical-acquire nonce or token.
 		purpose := principal.Actor + " [Pi session " + runtime + "]"
+		if id, ok := r.Context().Value(codexAttributionKey{}).(codexIdentity); ok {
+			purpose = principal.Actor + " [Codex session " + id.Session + ", thread " + id.Thread + ", instance " + id.Instance + "]"
+		}
 		if in.Purpose != "" {
 			purpose += ": " + in.Purpose
 		}

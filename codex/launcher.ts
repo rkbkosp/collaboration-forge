@@ -22,6 +22,7 @@ export async function launchCodex(args:string[],env:NodeJS.ProcessEnv=process.en
  const instance=randomUUID();const file=join(dir,'instance-token');
  const childEnv:NodeJS.ProcessEnv={...env,FORGE_CODEX_INSTANCE_ID:instance,FORGE_CODEX_TOKEN_FILE:file};
  delete childEnv.FORGE_SOCKET;
+ delete childEnv.CODEX_SESSION_ID;delete childEnv.CODEX_THREAD_ID;
  let registered=false;
  try{
   await writeFile(file,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});

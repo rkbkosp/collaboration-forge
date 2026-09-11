@@ -1,0 +1,16 @@
+import { codexRPC, CodexError } from './transport.ts';
+import { codexIdentity } from './facade.ts';
+export const PROTOCOL='Forge is this workspace\'s work ledger. Before substantial work, inspect and claim the relevant issue with forge issue. Record discoveries as comments/issues/links. Close with truthful typed evidence, or release when handing off. Use forge --help. Runtime authority and renewal are managed by forged; never start a legacy session broker inside Codex.';
+export async function handleHook(input:any,env:NodeJS.ProcessEnv=process.env,rpc:typeof codexRPC=codexRPC):Promise<any>{
+ if(!input||typeof input!=='object'||Array.isArray(input)||typeof input.session_id!=='string')throw new CodexError('invalid_hook');
+ if(env.CODEX_SESSION_ID&&env.CODEX_SESSION_ID!==input.session_id)throw new CodexError('hook_identity_mismatch');
+ // v0.154.0 supplies agent_id on child tool/prompt/compact hooks too. Hook
+ // commands use an environment snapshot, so do not inherit a parent's thread.
+ const identity=codexIdentity({...env,CODEX_SESSION_ID:input.session_id,CODEX_THREAD_ID:input.agent_id??input.session_id});
+ const name=input.hook_event_name;
+ const events:Record<string,string>={SessionStart:input.source==='compact'?'context':'start',SubagentStart:'start',PostCompact:'context',PreCompact:'touch',PreToolUse:'touch',PostToolUse:'touch',UserPromptSubmit:'prompt',SessionEnd:'session_end',Interrupt:'interrupt',Stop:'stop_check',SubagentStop:'stop_check'};
+ if(!Object.hasOwn(events,name))throw new CodexError('unsupported_hook');
+ const state=await rpc('event',{identity,event:events[name]},env,name==='SessionEnd'||name==='Interrupt'?650:2500);
+ if(name==='SessionStart'||name==='SubagentStart'||name==='PostCompact')return {hookSpecificOutput:{hookEventName:name,additionalContext:PROTOCOL+'\n'+JSON.stringify(state)}};
+ return {};
+}

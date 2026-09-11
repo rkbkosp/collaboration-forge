@@ -20,6 +20,7 @@ type codexRuntime struct {
 	mu        sync.Mutex
 	instances map[string]*codexInstance
 	threads   map[codexIdentity]*codexThread
+	ended     map[codexSessionKey]bool
 	tools     http.Handler
 	alive     func(int, string) bool
 }
@@ -36,6 +37,7 @@ type codexThread struct {
 	instance      *codexInstance
 	retired       bool
 	release       bool
+	paused        bool
 	lastSeen      time.Time
 	nextRenew     time.Time
 	active        *codexTenure
@@ -64,7 +66,7 @@ type codexCommand struct {
 type codexAttributionKey struct{}
 
 func newCodexRuntime(tools http.Handler) *codexRuntime {
-	return &codexRuntime{instances: map[string]*codexInstance{}, threads: map[codexIdentity]*codexThread{}, tools: tools, alive: codexProcessAlive}
+	return &codexRuntime{ended: map[codexSessionKey]bool{}, instances: map[string]*codexInstance{}, threads: map[codexIdentity]*codexThread{}, tools: tools, alive: codexProcessAlive}
 }
 func codexNonce() string {
 	var b [16]byte
@@ -153,6 +155,10 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		codexReply(w, map[string]bool{"stopped": true})
 		return
 	}
+	if op == "event" {
+		m.event(w, r, digest)
+		return
+	}
 	if op != "tool" {
 		codexFail(w, 404, "unknown_operation")
 		return
@@ -172,8 +178,7 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		codexFail(w, 403, "invalid_instance")
 		return
 	}
-	if instance.retired || !m.alive(instance.pid, instance.birth) {
-		instance.retired = true
+	if instance.retired || m.ended[codexSessionKey{in.Identity.Instance, in.Identity.Session}] || !m.alive(instance.pid, instance.birth) {
 		m.mu.Unlock()
 		codexFail(w, 409, "runtime_stopped")
 		return
@@ -192,7 +197,7 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	m.mu.Lock()
-	stopped := instance.retired
+	stopped := instance.retired || m.ended[codexSessionKey{in.Identity.Instance, in.Identity.Session}]
 	m.mu.Unlock()
 	if t.retired || stopped {
 		codexFail(w, 409, "runtime_stopped")
@@ -425,8 +430,8 @@ func (m *codexRuntime) tick() {
 	normal := map[*codexThread]bool{}
 	for _, t := range m.threads {
 		ts = append(ts, t)
-		dead[t] = t.instance.retired
-		normal[t] = t.instance.normal
+		dead[t] = t.instance.retired || m.ended[codexSessionKey{t.identity.Instance, t.identity.Session}]
+		normal[t] = t.instance.normal || m.ended[codexSessionKey{t.identity.Instance, t.identity.Session}]
 	}
 	m.mu.Unlock()
 	var wg sync.WaitGroup
@@ -437,7 +442,8 @@ func (m *codexRuntime) tick() {
 			t.mu.Lock()
 			defer t.mu.Unlock()
 			m.mu.Lock()
-			deadNow, normalNow := t.instance.retired, t.instance.normal
+			ended := m.ended[codexSessionKey{t.identity.Instance, t.identity.Session}]
+			deadNow, normalNow := t.instance.retired || ended, t.instance.normal || ended
 			m.mu.Unlock()
 			isDead, isNormal := dead[t] || deadNow, normal[t] || normalNow
 			if isDead && !t.retired {
@@ -455,7 +461,7 @@ func (m *codexRuntime) tick() {
 				t.pending = nil
 				return
 			}
-			if t.active == nil {
+			if t.active == nil || t.paused {
 				return
 			}
 			if !time.Now().Before(t.active.deadline) {

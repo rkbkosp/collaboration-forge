@@ -16,9 +16,9 @@ const evidence = Type.Object({
 }, { additionalProperties: false });
 
 export const toolSchemas = {
-  issue_list: Type.Object({ status: Type.Optional(text()), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })) }, { additionalProperties: false }),
+  issue_list: Type.Object({ status: Type.Optional(StringEnum(["open", "closed"])), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })) }, { additionalProperties: false }),
   issue_get: Type.Object({ ref }, { additionalProperties: false }),
-  issue_graph: Type.Object({ ref, depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })) }, { additionalProperties: false }),
+  issue_graph: Type.Object({ ref, depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }, { additionalProperties: false }),
   issue_create: Type.Object({ title: text(), body: Type.Optional(Type.String()) }, { additionalProperties: false }),
   issue_comment: Type.Object({ ref, body: text() }, { additionalProperties: false }),
   issue_link: Type.Object({ ref, type: StringEnum(["parent", "blocks", "related"]), to_ref: text() }, { additionalProperties: false }),

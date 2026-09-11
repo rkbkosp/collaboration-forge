@@ -128,14 +128,14 @@ const piSessionId = randomUUID(); // In Pi: ctx.sessionManager.getSessionId()
 const a = await Controller.fromEnv(piSessionId);
 const b = await Controller.fromEnv(piSessionId); // SAME session, new runtime
 try {
-  await a.execute("issue_claim", { ref: "project#abc" });
+  await a.execute("issue_claim", { ref: "abc4" }); // Bare short ID; qualified refs are forbidden.
   // b.execute("issue_claim", sameRef) must conflict until release/expiry.
-  await b.execute("issue_comment", { ref: "project#abc", body: "Finding" });
+  await b.execute("issue_comment", { ref: "abc4", body: "Finding" });
   const blocked = await b.guardTool("edit"); // {block:true, reason:...}
   const allowed = await a.guardTool("edit"); // undefined iff freshly confirmed
   const state = a.state(); // safe mode/reason/binding/pending flags, never tokens
   const context = await a.context(); // freshly read, redacted model context
-  await a.execute("issue_release", { ref: "project#abc" });
+  await a.execute("issue_release", { ref: "abc4" });
 } finally {
   await a.shutdown("test");
   await b.shutdown("test");

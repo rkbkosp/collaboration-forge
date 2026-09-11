@@ -18,6 +18,7 @@
   },
   "scripts": {
     "test": "tsx --test extensions/*.test.ts",
+    "test:e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

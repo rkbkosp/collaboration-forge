@@ -3,6 +3,7 @@ package forge
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,10 @@ import (
 const codexTestToken = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func codexRequest(m http.Handler, op string, body any, token string) *httptest.ResponseRecorder {
+	if c, ok := body.(codexCommand); ok && c.RequestID == "" {
+		c.RequestID = codexNonce()
+		body = c
+	}
 	b, _ := json.Marshal(body)
 	r := httptest.NewRequest("POST", "/forge/v1/codex/"+op, bytes.NewReader(b))
 	r.Header.Set("X-Forge-Codex-Token", token)
@@ -134,5 +139,69 @@ func TestCodexEndDoesNotWaitForBusyThread(t *testing.T) {
 		}
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("end blocked on execution")
+	}
+}
+
+func TestCodexResultReplayCannotRepeatMutationOrCrossTenure(t *testing.T) {
+	f := newToolsFixture(t)
+	uid, _ := toolsCreate(t, f.handler, "Codex receipt")
+	m := newCodexRuntime(f.handler)
+	codexRequest(m, "register", map[string]any{"instance_id": "replay", "pid": os.Getpid()}, codexTestToken)
+	i := codexIdentity{"replay", "s", "t"}
+	cmd := codexCommand{Identity: i, Operation: "issue_claim", Params: marshalCodex(map[string]string{"ref": uid}), RequestID: "request-1"}
+	first := codexRequest(m, "tool", cmd, codexTestToken)
+	toolsSuccess(t, first)
+	again := codexRequest(m, "tool", cmd, codexTestToken)
+	toolsSuccess(t, again)
+	if !bytes.Equal(first.Body.Bytes(), again.Body.Bytes()) {
+		t.Fatal("original response not recovered")
+	}
+	cmd.Params = marshalCodex(map[string]string{"ref": "different"})
+	if w := codexRequest(m, "tool", cmd, codexTestToken); w.Code != 409 {
+		t.Fatal("request ID rebound")
+	}
+	codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_release", Params: marshalCodex(map[string]string{"ref": uid})}, codexTestToken)
+	cmd.Params = marshalCodex(map[string]string{"ref": uid})
+	toolsSuccess(t, codexRequest(m, "tool", cmd, codexTestToken))
+	if m.threads[i].active != nil {
+		t.Fatal("replayed acquire restored old tenure")
+	}
+}
+
+func TestCodexAmbiguousAcquireReusesAttemptAndContributionDoesNotClearPending(t *testing.T) {
+	f := newToolsFixture(t)
+	uid, _ := toolsCreate(t, f.handler, "Ambiguous acquire")
+	var attempts []string
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "issue_claim") {
+			var p map[string]any
+			json.NewDecoder(r.Body).Decode(&p)
+			attempts = append(attempts, p["attempt_id"].(string))
+			r.Body = io.NopCloser(bytes.NewReader(marshalCodex(p)))
+			if len(attempts) == 1 {
+				original := httptest.NewRecorder()
+				f.handler.ServeHTTP(original, r)
+				toolsSuccess(t, original)
+				w.WriteHeader(502)
+				w.Write([]byte(`{}`))
+				return
+			}
+		}
+		f.handler.ServeHTTP(w, r)
+	})
+	m := newCodexRuntime(h)
+	codexRequest(m, "register", map[string]any{"instance_id": "retry", "pid": os.Getpid()}, codexTestToken)
+	i := codexIdentity{"retry", "s", "t"}
+	cmd := codexCommand{Identity: i, Operation: "issue_claim", Params: marshalCodex(map[string]string{"ref": uid}), RequestID: "stable"}
+	if w := codexRequest(m, "tool", cmd, codexTestToken); w.Code != 502 {
+		t.Fatal(w.Code)
+	}
+	codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_comment", Params: marshalCodex(map[string]string{"ref": "bad", "body": "bad"})}, codexTestToken)
+	if m.threads[i].pending == nil {
+		t.Fatal("contribution erased execution retry")
+	}
+	toolsSuccess(t, codexRequest(m, "tool", cmd, codexTestToken))
+	if len(attempts) != 2 || attempts[0] != attempts[1] {
+		t.Fatal("new acquire identity on network retry")
 	}
 }

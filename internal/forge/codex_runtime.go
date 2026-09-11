@@ -31,15 +31,19 @@ type codexInstance struct {
 	normal  bool
 }
 type codexThread struct {
-	mu        sync.Mutex
-	identity  codexIdentity
-	instance  *codexInstance
-	retired   bool
-	release   bool
-	lastSeen  time.Time
-	nextRenew time.Time
-	active    *codexTenure
-	pending   *codexPending
+	mu            sync.Mutex
+	identity      codexIdentity
+	instance      *codexInstance
+	retired       bool
+	release       bool
+	lastSeen      time.Time
+	nextRenew     time.Time
+	active        *codexTenure
+	pending       *codexPending
+	receipts      map[string]*codexReceipt
+	receiptOrder  []string
+	receiptBytes  int
+	lastExecution []byte
 }
 type codexTenure struct {
 	ref, alias, token, claim string
@@ -52,6 +56,7 @@ type codexPending struct {
 	key       string
 }
 type codexCommand struct {
+	RequestID string          `json:"request_id"`
 	Identity  codexIdentity   `json:"identity"`
 	Operation string          `json:"operation"`
 	Params    json.RawMessage `json:"params,omitempty"`
@@ -194,7 +199,7 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t.lastSeen = time.Now()
-	m.execute(w, t, in.Operation, in.Params)
+	m.command(w, t, in)
 }
 func (m *codexRuntime) dispatch(t *codexThread, op string, params json.RawMessage, token, key string) *httptest.ResponseRecorder {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

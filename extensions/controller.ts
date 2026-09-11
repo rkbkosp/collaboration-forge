@@ -3,6 +3,7 @@ import { v7 as uuidv7 } from "uuid";
 import { performance } from "node:perf_hooks";
 import { loadConfig, validateTTL, validateURL, type ForgeConfig } from "./config.ts";
 import { validateParams, type ToolName } from "./schemas.ts";
+import { directFetch } from "./direct-fetch.ts";
 
 export interface Clock {
   /** Monotonic milliseconds, never Date.now(). */
@@ -11,7 +12,7 @@ export interface Clock {
   clearTimeout(handle: unknown): void;
 }
 export interface ControllerOptions {
-  /** Real ctx.sessionManager.getSessionId(), NOT the runtime identity. */
+  /** Real Pi session UUID or a fresh broker-generated UUID, NOT the runtime identity. */
   sessionId: string;
   fetch?: typeof fetch;
   clock?: Clock;
@@ -58,8 +59,9 @@ export class ForgeError extends Error {
   }
 }
 
-/** A single Pi runtime. No persistence or history API; every constructor creates
- * a fresh instance, never an old execution. Config injection is for host/E2E use only. */
+/** A single worker runtime (Pi factory or CLI session broker). No persistence or
+ * history API; every constructor creates a fresh instance, never an old execution.
+ * Config injection is for host/E2E use only. */
 export class Controller {
   readonly #runtimeId = randomUUID();
   readonly #sessionId: string;
@@ -80,10 +82,12 @@ export class Controller {
   #leaseView: unknown = null;
   #pendingClaim?: PendingClaim;
   #pendingClose?: PendingClose;
+  readonly #retryRequests = new WeakMap<object, PendingClaim | PendingClose>();
   #timer?: unknown;
   #queue: Promise<unknown> = Promise.resolve();
   #shutdown?: Promise<void>;
 
+  /** sessionId is the real Pi UUID or a broker-generated UUID; neither restores a tenure. */
   constructor(config: ForgeConfig, options: ControllerOptions) {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.sessionId)) throw new Error("A real Pi session UUID is required");
     this.#sessionId = options.sessionId;
@@ -92,7 +96,8 @@ export class Controller {
     if (!config.workerToken || /\s/.test(config.workerToken)) throw new Error("Invalid Forge worker credential");
     this.#workerToken = config.workerToken;
     this.#secrets.add(config.workerToken);
-    this.#fetch = options.fetch ?? fetch;
+    const transport = options.fetch ?? fetch;
+    this.#fetch = (input, init) => directFetch(input, init, transport);
     this.#clock = options.clock ?? realClock;
     this.#timeout = options.requestTimeoutMs ?? 10_000;
     this.#shutdownTimeout = options.shutdownTimeoutMs ?? 1_500;
@@ -133,8 +138,12 @@ export class Controller {
   }
 
   execute(name: ToolName, params: unknown, signal?: AbortSignal): Promise<ObjectJSON> {
+    const retry = params && typeof params === "object" ? this.#retryRequests.get(params) : undefined;
     return this.#exclusive(async () => {
       this.#assertRunning();
+      if (retry && retry !== this.#pendingClose && retry !== this.#pendingClaim) {
+        throw new ForgeError("no_pending", "The original pending request already finished; no new operation was attempted");
+      }
       validateParams(name, params);
       // Own the request data before any await; external callers cannot mutate retries.
       const body = JSON.parse(JSON.stringify(params)) as ObjectJSON;
@@ -153,6 +162,20 @@ export class Controller {
         throw error;
       }
     });
+  }
+
+  /** Retry only this runtime's retained request, never caller-supplied data.
+   * Signatures contain validated logical params: claim bodies additionally have
+   * private attempt/TTL fields, while close signatures already use canonical ref. */
+  async retryPending(signal?: AbortSignal): Promise<ObjectJSON> {
+    this.#assertRunning();
+    const pending = this.#pendingClose ?? this.#pendingClaim;
+    if (!pending) throw new ForgeError("no_pending", "No pending claim or close request to retry");
+    const params = JSON.parse(pending.signature) as ObjectJSON;
+    // Check identity again inside execute's queue: an earlier retry can finish
+    // and a new tenure can start before this retry reaches the front.
+    this.#retryRequests.set(params, pending);
+    return this.execute(this.#pendingClose ? "issue_close" : "issue_claim", params, signal);
   }
 
   /** Cooperative preflight only: cannot sandbox OS access or cancel an already

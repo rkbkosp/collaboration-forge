@@ -8,28 +8,39 @@
     "extensions/README.md",
     "extensions/controller.ts",
     "extensions/config.ts",
-    "extensions/schemas.ts"
+    "extensions/schemas.ts",
+    "client/",
+    "scripts/forge.mjs",
+    "skills/collab-forge-client/",
+    "extensions/direct-fetch.ts"
   ],
   "engines": {
     "node": ">=22.19.0"
   },
   "pi": {
-    "extensions": ["./extensions/forge.ts"]
+    "extensions": [
+      "./extensions/forge.ts"
+    ]
   },
   "scripts": {
-    "test": "tsx --test extensions/*.test.ts",
+    "test": "tsx --test extensions/*.test.ts client/*.test.ts",
     "test:e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "forge": "node scripts/forge.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.1",
     "@earendil-works/pi-coding-agent": "0.85.1",
+    "tsx": "4.23.13",
     "typebox": "1.3.7",
+    "undici": "7.29.1",
     "uuid": "13.0.2"
   },
   "devDependencies": {
     "@types/node": "22.19.19",
-    "tsx": "4.23.13",
     "typescript": "5.9.3"
+  },
+  "bin": {
+    "forge": "scripts/forge.mjs"
   }
 }

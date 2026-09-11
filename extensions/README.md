@@ -20,7 +20,9 @@ symlinks, empty tokens, and files over 16 KiB are rejected. Do not paste the tok
 into Pi prompts, shell arguments/history, or configuration stored in a session.
 The URL must be a literal loopback origin (`127.0.0.0/8` or `::1`), optionally
 with a port. Hostnames, paths, userinfo, query/fragment, shorthand/octal/integer
-IPv4 forms, and redirects are rejected. Only the three environment variables
+IPv4 forms, and redirects are rejected. A private direct HTTP dispatcher bypasses
+Node environment proxies, so `HTTP_PROXY` / `NODE_USE_ENV_PROXY` cannot route
+Forge credentials away from loopback. Only the three environment variables
 above configure the production adapter; defaults are URL `http://127.0.0.1:7347`
 and TTL 300 seconds (valid range 60–3600).
 

@@ -118,6 +118,60 @@ test("ambiguous acquire reuses attempt; cross-ref blocked; release/new runtime/n
   await b.shutdown();
 });
 
+test("retryPending replays the exact original acquire signature and private attempt only in this runtime", async () => {
+  const h = harness(); const a = h.controller();
+  await assert.rejects(a.retryPending(), /no_pending/);
+  const body = { ref: "#1", purpose: "original purpose" };
+  h.faultClaim();
+  await assert.rejects(a.execute("issue_claim", body), /ambiguous/i);
+  body.ref = "#2"; body.purpose = "changed";
+  await a.retryPending();
+  const claims = h.calls.filter((c) => c.name === "issue_claim");
+  assert.equal(claims.length, 2);
+  assert.deepEqual(claims[0].body, claims[1].body);
+  assert.equal(claims[1].body.ref, "#1");
+  assert.equal(claims[1].body.purpose, "original purpose");
+  await assert.rejects(a.retryPending(), /no_pending/);
+  const fresh = h.controller();
+  await assert.rejects(fresh.retryPending(), /no_pending/);
+  await a.shutdown(); await fresh.shutdown();
+});
+
+test("retryPending close preserves canonical snapshot, key, proof and evidence after lease expiry", async () => {
+  const h = harness(); const a = h.controller();
+  await a.execute("issue_claim", { ref: "#1" });
+  const body = structuredClone(closeBody);
+  h.faultClose(); await assert.rejects(a.execute("issue_close", body), /ambiguous/i);
+  body.ref = "#2"; body.message = "changed"; body.evidence[0].command = "changed";
+  await h.clock.advance(60_000); await a.context();
+  const aborted = new AbortController(); aborted.abort();
+  await assert.rejects(a.retryPending(aborted.signal));
+  assert.equal(a.state().pendingClose, true);
+  const result = await a.retryPending();
+  const closes = h.calls.filter((c) => c.name === "issue_close");
+  assert.equal(closes.length, 2);
+  assert.deepEqual(closes[0].body, closes[1].body);
+  assert.equal(closes[1].body.ref, "issue-uid");
+  assert.equal(closes[0].headers.get("Idempotency-Key"), closes[1].headers.get("Idempotency-Key"));
+  assert.equal(closes[0].headers.get("X-Forge-Execution"), closes[1].headers.get("X-Forge-Execution"));
+  assert.ok(!JSON.stringify(result).includes("signed-secret"));
+  await assert.rejects(a.retryPending(), /no_pending/);
+  await a.shutdown();
+});
+
+test("queued duplicate retries cannot apply a retired close snapshot to a new tenure", async () => {
+  const h = harness(); const a = h.controller();
+  await a.execute("issue_claim", { ref: "#1" });
+  h.faultClose(); await assert.rejects(a.execute("issue_close", closeBody), /ambiguous/i);
+  const first = a.retryPending();
+  const nextTenure = a.execute("issue_claim", { ref: "#1" });
+  const duplicate = assert.rejects(a.retryPending(), /no_pending/);
+  await first; await nextTenure; await duplicate;
+  assert.equal(a.state().mode, "live");
+  assert.equal(h.calls.filter((c) => c.name === "issue_close").length, 2);
+  await a.shutdown();
+});
+
 test("A holder/B conflict; nonholder can comment/link; every editing gate rechecks", async () => {
   const h = harness(); const a = h.controller(); const b = h.controller();
   await a.execute("issue_claim", { ref: "#1" });

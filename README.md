@@ -58,6 +58,49 @@ forge_auth | curl --fail --header @- -H 'Content-Type: application/json' \
 unset -f forge_auth
 ```
 
+## Independent client CLI and Skill
+
+The `forge` client runs without a Pi process (Node >=22.19, macOS/Linux):
+
+```sh
+npm ci
+npm link   # optional; alternatively: node scripts/forge.mjs ...
+forge --help
+export FORGE_URL=http://127.0.0.1:7347
+export FORGE_WORKER_TOKEN_FILE="$PWD/.forge/worker-token"
+forge issue list --status open
+forge skill install --target "$HOME/.agents/skills/collab-forge-client"
+```
+
+For execution, start a dedicated foreground runtime in one terminal:
+
+```sh
+mkdir -m 700 /tmp/my-forge-worker
+forge session start --socket /tmp/my-forge-worker/s.sock
+```
+
+In that worker's command environment:
+
+```sh
+export FORGE_SOCKET=/tmp/my-forge-worker/s.sock
+forge session wait
+forge issue claim ISSUE_REF --purpose 'Implement the agreed acceptance criteria'
+forge session guard          # must allow before using editing/execution tools
+# ...perform and verify the work...
+forge issue close ISSUE_REF --data-file truthful-close.json
+# If uncertain: forge session retry  (never replace the original request)
+forge session stop
+```
+
+Each independent worker needs its own fresh directory/socket. The runtime owns
+heartbeat and private proofs/retry snapshots in memory; short-lived CLI calls do
+not restore an execution from disk. Contributions remain available without a
+lease. All worker operations, paginated timeline, explicit Human administration,
+JSON/file inputs, exit codes, safety boundaries and recovery are documented in
+[the client Skill reference](skills/collab-forge-client/references/cli.md).
+`forge admin ...` requires a separate supervisor credential; it never falls back
+to the worker token. See [client acceptance](docs/client-acceptance.md).
+
 ## Pi extension
 
 Use Pi 0.85.1 and Node >=22.19:

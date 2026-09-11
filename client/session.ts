@@ -3,7 +3,7 @@ import type { Stats } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { dirname, isAbsolute, join, normalize } from "node:path";
 import { Controller, ForgeError } from "../pi-extension/controller.ts";
-import { errorCode, forgeErrorEnvelope } from "../pi-extension/errors.ts";
+import { errorCode, forgeErrorEnvelope, redactErrorValue } from "../pi-extension/errors.ts";
 import { toolSchemas, type ToolName } from "../pi-extension/schemas.ts";
 
 const MAX_REQUEST = 1024 * 1024;
@@ -318,8 +318,11 @@ export async function requestSession(socketPath: string, request: Request): Prom
             (error.hint !== undefined && typeof error.hint !== "string") ||
             (error.data !== undefined && (!record(error.data) || Array.isArray(error.data))) ||
             Object.keys(error).some((key) => !["code", "message", "ambiguous", "hint", "data"].includes(key))) throw new Error();
-        finish(failure(responseCode, error.message, error.ambiguous === true, typeof responseStatus === "number" ? responseStatus : 0,
-          { ...(typeof error.hint === "string" ? { hint: error.hint } : {}), ...(record(error.data) ? { data: error.data } : {}) }));
+        const safeMessage = String(redactErrorValue(error.message));
+        const safeHint = typeof error.hint === "string" ? String(redactErrorValue(error.hint)) : undefined;
+        const safeData = record(error.data) ? redactErrorValue(error.data) as Record<string, unknown> : undefined;
+        finish(failure(responseCode, safeMessage, error.ambiguous === true, typeof responseStatus === "number" ? responseStatus : 0,
+          { ...(safeHint ? { hint: safeHint } : {}), ...(safeData ? { data: safeData } : {}) }));
       } catch { finish(failure("invalid_response", "Invalid session response; check state before retrying", uncertain())); }
     });
   });

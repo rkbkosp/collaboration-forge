@@ -193,6 +193,11 @@ test("client rejects unavailable, malformed, incomplete and oversized broker rep
       await assert.rejects(requestSession(path, { op: "state" }), (error: unknown) => error instanceof ForgeError && !error.message.includes("secret") && ["invalid_response", "response_too_large"].includes(error.code));
     } finally { await stop(server); }
   }
+  const server = createServer((socket) => { socket.on("error", () => {}); socket.once("data", () => socket.end('{"ok":false,"error":{"code":"remote_error","message":"Bearer private-token","hint":"Bearer private-token","data":{"execution_token":"private-token","safe":true}}}\n')); });
+  await listen(server, path); await chmod(path, 0o600);
+  try {
+    await assert.rejects(requestSession(path, { op: "state" }), (error: unknown) => error instanceof ForgeError && !error.message.includes("private-token") && !String(error.hint).includes("private-token") && !JSON.stringify(error.data).includes("private-token"));
+  } finally { await stop(server); }
 });
 
 test("shutdown replies first, is idempotent, and idle/slow clients cannot hold close open", async (t) => {

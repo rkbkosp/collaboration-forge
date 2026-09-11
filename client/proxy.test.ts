@@ -21,7 +21,7 @@ for(const implementation of ['http','controller']) test(`${implementation} never
  const url=`http://127.0.0.1:${a.port}`,proxyURL=`http://127.0.0.1:${b.port}`;
  const setup=implementation==='http'
   ? `import {ClientHTTP} from './client/http.ts'; const result=await new ClientHTTP('${url}','test-only-fixture','session').request('/forge/v1/project');`
-  : `import {Controller} from './extensions/controller.ts';import {randomUUID} from 'node:crypto';const c=new Controller({url:'${url}',workerToken:'test-only-fixture',ttlSeconds:60},{sessionId:randomUUID()});const result=await c.execute('issue_list',{});await c.shutdown();`;
+  : `import {Controller} from './pi-extension/controller.ts';import {randomUUID} from 'node:crypto';const c=new Controller({url:'${url}',workerToken:'test-only-fixture',ttlSeconds:60},{sessionId:randomUUID()});const result=await c.execute('issue_list',{});await c.shutdown();`;
  try {
   const {stdout}=await exec(process.execPath,['--import','tsx','--input-type=module','-e',setup+'console.log(JSON.stringify(result));'],{timeout:15_000,env:{...process.env,NODE_USE_ENV_PROXY:'1',HTTP_PROXY:proxyURL,http_proxy:proxyURL,HTTPS_PROXY:proxyURL,https_proxy:proxyURL,NO_PROXY:'',no_proxy:''}});
   assert.equal(proxyHits,0,'Configured proxy must not see a Forge request');

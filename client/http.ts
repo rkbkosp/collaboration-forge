@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { Controller, ForgeError } from '../extensions/controller.ts';
-import { validateURL } from '../extensions/config.ts';
-import { directFetch } from '../extensions/direct-fetch.ts';
+import { Controller, ForgeError } from '../pi-extension/controller.ts';
+import { validateURL } from '../pi-extension/config.ts';
+import { directFetch } from '../pi-extension/direct-fetch.ts';
 
 /** No credentials in outward objects/errors; no raw arbitrary-origin request. */
 export class ClientHTTP {

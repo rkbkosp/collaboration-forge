@@ -7,7 +7,7 @@ import { promisify } from 'node:util';
 import { resolve, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { performance } from 'node:perf_hooks';
-import { Controller, ForgeError } from '../extensions/controller.ts';
+import { Controller, ForgeError } from '../pi-extension/controller.ts';
 import { startForge } from './harness.ts';
 
 const exec = promisify(execFile);

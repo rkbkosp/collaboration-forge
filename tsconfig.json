@@ -12,7 +12,7 @@
     ]
   },
   "include": [
-    "extensions/**/*.ts",
+    "pi-extension/**/*.ts",
     "tests/**/*.ts",
     "client/**/*.ts",
     "codex/**/*.ts"

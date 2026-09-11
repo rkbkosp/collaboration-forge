@@ -4,8 +4,8 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { Controller, ForgeError } from "../extensions/controller.ts";
-import { toolSchemas } from "../extensions/schemas.ts";
+import { Controller, ForgeError } from "../pi-extension/controller.ts";
+import { toolSchemas } from "../pi-extension/schemas.ts";
 import { requestSession, startSession } from "./session.ts";
 
 async function directory(t: TestContext) {

@@ -7,9 +7,9 @@ import { open, mkdir, cp, readdir } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { Controller, ForgeError } from '../extensions/controller.ts';
-import { loadConfig, validateURL } from '../extensions/config.ts';
-import { toolSchemas, type ToolName } from '../extensions/schemas.ts';
+import { Controller, ForgeError } from '../pi-extension/controller.ts';
+import { loadConfig, validateURL } from '../pi-extension/config.ts';
+import { toolSchemas, type ToolName } from '../pi-extension/schemas.ts';
 import { ClientHTTP } from './http.ts';
 import { startSession, requestSession } from './session.ts';
 

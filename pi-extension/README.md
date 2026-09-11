@@ -12,7 +12,7 @@ npm ci
 export FORGE_URL=http://127.0.0.1:7347
 export FORGE_WORKER_TOKEN_FILE=/absolute/path/to/worker-token
 export FORGE_TTL_SECONDS=300
-pi -e ./extensions/forge.ts
+pi -e ./pi-extension/forge.ts
 ```
 
 The token file must be an owned regular file with exactly `0600` permissions;
@@ -27,7 +27,7 @@ above configure the production adapter; defaults are URL `http://127.0.0.1:7347`
 and TTL 300 seconds (valid range 60–3600).
 
 For package installation use the root `pi.extensions` manifest, which selects
-only `extensions/forge.ts`, not the helper/test modules. CLI `-e` is convenient
+only `pi-extension/forge.ts`, not the helper/test modules. CLI `-e` is convenient
 for trials; follow Pi's extension installation guidance for normal discovery.
 
 ## Tools and workflow
@@ -118,11 +118,11 @@ is the correctness boundary for issue mutations.
 
 ## Exported controller / real-server E2E
 
-`extensions/forge.ts` exports `Controller`, `ForgeError`, `loadConfig`, the
+`pi-extension/forge.ts` exports `Controller`, `ForgeError`, `loadConfig`, the
 `ForgeConfig`/`ControllerOptions`/`Clock` types, and `registerForge`.
 
 ```ts
-import { Controller } from "./extensions/forge.ts";
+import { Controller } from "./pi-extension/forge.ts";
 import { randomUUID } from "node:crypto";
 
 // Production configuration reader; no token literal required.

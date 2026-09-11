@@ -2,8 +2,8 @@ import { chmod, link, lstat, mkdtemp, rmdir, unlink } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { dirname, isAbsolute, join, normalize } from "node:path";
-import { Controller, ForgeError } from "../extensions/controller.ts";
-import { toolSchemas, type ToolName } from "../extensions/schemas.ts";
+import { Controller, ForgeError } from "../pi-extension/controller.ts";
+import { toolSchemas, type ToolName } from "../pi-extension/schemas.ts";
 
 const MAX_REQUEST = 1024 * 1024;
 const MAX_RESPONSE = 8 * 1024 * 1024;

@@ -12,7 +12,7 @@ import {
 import { Check } from 'typebox/value';
 import { startForge } from './harness.ts';
 
-const extensionPath = fileURLToPath(new URL('../extensions/forge.ts', import.meta.url));
+const extensionPath = fileURLToPath(new URL('../pi-extension/forge.ts', import.meta.url));
 const issueTools = [
   'issue_claim', 'issue_close', 'issue_comment', 'issue_create', 'issue_get',
   'issue_graph', 'issue_link', 'issue_list', 'issue_release', 'issue_renew',

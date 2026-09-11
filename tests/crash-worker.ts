@@ -1,4 +1,4 @@
-import { Controller } from '../extensions/controller.ts';
+import { Controller } from '../pi-extension/controller.ts';
 
 try {
   const controller = await Controller.fromEnv(process.env.TEST_PI_SESSION!);

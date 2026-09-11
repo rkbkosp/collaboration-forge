@@ -5,15 +5,15 @@
   "license": "MIT",
   "type": "module",
   "files": [
-    "extensions/forge.ts",
-    "extensions/README.md",
-    "extensions/controller.ts",
-    "extensions/config.ts",
-    "extensions/schemas.ts",
+    "pi-extension/forge.ts",
+    "pi-extension/README.md",
+    "pi-extension/controller.ts",
+    "pi-extension/config.ts",
+    "pi-extension/schemas.ts",
     "client/",
     "scripts/forge.mjs",
     "skills/collab-forge-client/",
-    "extensions/direct-fetch.ts",
+    "pi-extension/direct-fetch.ts",
     "codex/",
     "scripts/forge-codex-hook.mjs"
   ],
@@ -22,11 +22,11 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/forge.ts"
+      "./pi-extension/forge.ts"
     ]
   },
   "scripts": {
-    "test": "tsx --test extensions/*.test.ts client/*.test.ts codex/*.test.ts",
+    "test": "tsx --test pi-extension/*.test.ts client/*.test.ts codex/*.test.ts",
     "test:e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "forge": "node scripts/forge.mjs",

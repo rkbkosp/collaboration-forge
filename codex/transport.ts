@@ -1,7 +1,7 @@
-import { directFetch } from '../extensions/direct-fetch.ts';
+import { directFetch } from '../pi-extension/direct-fetch.ts';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import { loadConfig } from '../extensions/config.ts';
+import { loadConfig } from '../pi-extension/config.ts';
 
 export class CodexError extends Error {
  constructor(public code:string, public ambiguous=false){super(code);}

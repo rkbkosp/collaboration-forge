@@ -2,5 +2,5 @@
 /.forge/
 /bin/
 /node_modules/
-/extensions/node_modules/
+/pi-extension/node_modules/
 *.test

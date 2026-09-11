@@ -36,5 +36,5 @@ export async function codexCommand(args:string[],env:NodeJS.ProcessEnv=process.e
    output(result);return 0;
   }
   return await launchCodex(args,env);
- }catch(e){const code=e instanceof CodexError?e.code:'codex_command_failed';const ambiguous=e instanceof CodexError&&e.ambiguous;process.stderr.write(JSON.stringify({error:{code,ambiguous}})+'\n');return ambiguous?3:code==='usage'?2:1;}
+ }catch(e){const code=e instanceof CodexError?e.code:'codex_command_failed';const ambiguous=e instanceof CodexError&&e.ambiguous;process.stderr.write(JSON.stringify({error:{code,ambiguous,...(code==='codex_configuration'?{hint:'Set FORGE_URL to the loopback service and FORGE_WORKER_TOKEN_FILE to an owned 0600 worker credential file; check FORGE_TTL_SECONDS (60..3600).'}:{})}})+'\n');return ambiguous?3:code==='usage'?2:1;}
 }

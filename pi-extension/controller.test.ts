@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
-import { Controller, type Clock } from "./controller.ts";
+import { Controller, ForgeError, type Clock } from "./controller.ts";
 
 class FakeClock implements Clock {
   time = 0;
@@ -262,7 +262,7 @@ test("frequent preflights do not postpone automatic renew", async () => {
 test("500 acquire/close retry retain full request identity; server errors cannot leak tokens", async () => {
   const h = harness(); const a = h.controller();
   h.intercept((call) => call.name === "issue_claim" ? new Response(JSON.stringify({ error: { code: "server_error", message: `${workerToken} response uncertain` } }), { status: 500 }) : undefined);
-  await assert.rejects(a.execute("issue_claim", { ref: "#1", purpose: "test" }), (err: Error) => /ambiguous/.test(err.message) && !err.message.includes(workerToken));
+  await assert.rejects(a.execute("issue_claim", { ref: "#1", purpose: "test" }), (err: unknown) => err instanceof ForgeError && err.ambiguous && !err.message.includes(workerToken));
   h.intercept(undefined);
   await a.execute("issue_claim", { ref: "#1", purpose: "test" });
   const claims = h.calls.filter((c) => c.name === "issue_claim");

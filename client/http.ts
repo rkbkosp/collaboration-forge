@@ -47,7 +47,7 @@ export class ClientHTTP {
       const raw=Buffer.concat(chunks).toString('utf8');
       let decoded: unknown;
       try { decoded=raw ? JSON.parse(raw) : {}; }
-      catch { if(response.ok)throw new ForgeError('invalid_response','Server returned non-JSON success; inspect state before repeating a mutation',response.status,mutation); }
+      catch { if(response.ok)throw new ForgeError('invalid_response',mutation ? 'Server returned non-JSON success; inspect state before retrying' : 'Server returned non-JSON success',response.status,mutation); }
       const result:any=this.#redactor.sanitize(decoded && typeof decoded==='object' ? decoded : {});
       if(!response.ok) {
         const body = result.error && typeof result.error === 'object' && !Array.isArray(result.error) ? result.error : {};

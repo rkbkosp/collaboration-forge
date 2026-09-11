@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { test } from "node:test";
-import { Controller, type Clock } from "./controller.ts";
+import { Controller, ForgeError, type Clock } from "./controller.ts";
 
 const config = { url: "http://127.0.0.1:7779", ttlSeconds: 60, workerToken: "static-do-not-disclose" };
 function claimResponse(init?: RequestInit, overrides = {}) {
@@ -41,7 +41,7 @@ test("real fetch refuses redirects instead of forwarding worker credentials", as
   const sourceURL = await listen(source);
   const controller = new Controller({ ...config, url: sourceURL }, { sessionId: randomUUID() });
   try {
-    await assert.rejects(controller.execute("issue_list", {}), /ambiguous/);
+    await assert.rejects(controller.execute("issue_list", {}), (error: unknown) => error instanceof ForgeError && !error.ambiguous && error.code === "transport_error");
     assert.equal(targetCalls, 0);
   } finally { await controller.shutdown(); await closeServer(source); await closeServer(target); }
 });

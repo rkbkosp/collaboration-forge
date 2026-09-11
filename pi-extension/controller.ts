@@ -460,9 +460,11 @@ export class Controller {
     for (const signal of signals) { if (signal.aborted) abort(); else signal.addEventListener("abort", abort, { once: true }); }
     // Real bounded deadline even with an injected/noncooperative fetch transport.
     const timer = setTimeout(abort, options.timeout ?? this.#timeout);
+    const uncertainError = () => new ForgeError(mutation ? "ambiguous_request" : "transport_error",
+      mutation ? "Request outcome cannot be confirmed; retry the original operation" : "Forge request failed; inspect state before retrying", 0, mutation);
     let rejectAbort: () => void = () => {};
     const aborted = new Promise<never>((_, reject) => {
-      rejectAbort = () => reject(new ForgeError("ambiguous_request", "Request outcome ambiguous (network/timeout/cancel); retry the original operation", 0, mutation));
+      rejectAbort = () => reject(uncertainError());
       controller.signal.addEventListener("abort", rejectAbort, { once: true });
       if (controller.signal.aborted) rejectAbort();
     });
@@ -477,7 +479,7 @@ export class Controller {
         });
         let data: ObjectJSON;
         try { data = object(await response.json()); }
-        catch { throw new ForgeError("ambiguous_response", "Unreadable response; retry original operation", response.status, responseAmbiguous(response.status)); }
+        catch { throw new ForgeError("invalid_response", mutation ? "Unreadable response; inspect state before retrying" : "Unreadable Forge response", response.status, responseAmbiguous(response.status)); }
         this.sanitize(data); // Register echoed secrets before constructing any error.
         if (!response.ok) {
           const safeData = this.sanitize(data);
@@ -488,9 +490,7 @@ export class Controller {
             ...(err.data && typeof err.data === "object" && !Array.isArray(err.data) ? { data: err.data } : {}),
           };
           const message = requiredString(err.message) ? err.message : "Forge rejected request";
-          throw new ForgeError(errorCode(err.code, "http_error"),
-            ambiguous ? `${message}; outcome ambiguous: retry original operation` : message,
-            response.status, ambiguous, details);
+          throw new ForgeError(errorCode(err.code, "http_error"), message, response.status, ambiguous, details);
         }
         return data;
       };
@@ -500,7 +500,7 @@ export class Controller {
     } catch (error) {
       if (error instanceof ForgeError) throw error;
       // Native fetch failures may contain URLs/headers; never expose their cause.
-      throw new ForgeError("ambiguous_request", "Request outcome ambiguous (network/timeout/cancel); retry the original operation", 0, mutation);
+      throw uncertainError();
     } finally {
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", rejectAbort);

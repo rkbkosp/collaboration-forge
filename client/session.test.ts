@@ -164,9 +164,10 @@ test("reject malformed, extra-field, multiline and oversized requests without di
 test("request errors preserve only sanitized ForgeError fields; native failures are generic", async (t) => {
   const { path } = await directory(t); const { controller, mock } = mockController();
   const broker = await startSession(path, controller); t.after(broker.close);
-  mock.execute = async () => { throw new ForgeError("uncertain", "worker-private Bearer invisible", 503, true); };
+  mock.execute = async () => { throw new ForgeError("uncertain", "worker-private Bearer invisible", 503, true, { hint: "retry safely", data: { cleanup_pending: false, execution_token: "hidden" } }); };
   await assert.rejects(requestSession(path, { op: "issue_claim", params: { ref: "#1" } }), (error: unknown) => {
-    assert.ok(error instanceof ForgeError); assert.equal(error.code, "uncertain"); assert.equal(error.ambiguous, true);
+    assert.ok(error instanceof ForgeError); assert.equal(error.code, "uncertain"); assert.equal(error.status, 503); assert.equal(error.hint, "retry safely");
+    assert.deepEqual(error.data, { cleanup_pending: false }); assert.equal(error.ambiguous, true);
     assert.ok(!error.message.includes("private")); assert.ok(!error.message.includes("invisible"));
     assert.equal((error as any).cause, undefined); return true;
   });

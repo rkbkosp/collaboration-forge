@@ -89,7 +89,22 @@ func codexReply(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 func codexFail(w http.ResponseWriter, status int, code string) {
-	toolError(status, code, code).serve(w)
+	toolError(status, code, codexErrorMessage(code)).serve(w)
+}
+
+func codexErrorMessage(code string) string {
+	switch code {
+	case "method_not_allowed":
+		return "Codex endpoint requires POST"
+	case "invalid_instance":
+		return "Codex instance credential is invalid"
+	case "validation":
+		return "Invalid Codex request"
+	case "unknown_operation":
+		return "Unknown Codex operation"
+	default:
+		return "Codex operation failed"
+	}
 }
 func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -373,8 +388,12 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 	res := m.dispatch(t, op, params, token, key)
 	var body map[string]any
 	err := json.Unmarshal(res.Body.Bytes(), &body)
-	if err != nil || res.Code >= 500 {
+	if err != nil {
 		codexFail(w, 502, "codex_operation_unknown")
+		return
+	}
+	if res.Code >= 500 {
+		forwardForgeError(w, res.Code, res.Body.Bytes(), "codex_operation_unknown", "Codex operation outcome is unknown")
 		return
 	}
 	if res.Code >= 300 {
@@ -385,7 +404,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 			t.active = nil
 		}
 		// Keep close tenure for correcting evidence, but never retry a rejected key.
-		codexFail(w, res.Code, "codex_operation_rejected")
+		forwardForgeError(w, res.Code, res.Body.Bytes(), "codex_operation_rejected", "Codex operation was rejected")
 		return
 	}
 	if op == "issue_claim" || op == "issue_renew" {

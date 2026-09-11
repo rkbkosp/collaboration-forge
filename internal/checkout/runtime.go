@@ -61,17 +61,126 @@ func NewRuntime(origin, token string, ttl int) (*Runtime, error) {
 	return &Runtime{url: strings.TrimSuffix(origin, "/"), worker: token, session: UUID(), attempt: UUID(), ttl: ttl, done: make(chan struct{}), lost: make(chan struct{}), client: &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
-type requestError struct{ status int }
+// Error is a sanitized Forge/checkout transport error. It intentionally carries
+// no response body, request, credential, or execution proof.
+type Error struct {
+	Status    int
+	Code      string
+	Message   string
+	Hint      string
+	Data      map[string]any
+	Ambiguous bool
+}
 
-func (e requestError) Error() string {
-	if e.status == 0 {
+func (e *Error) Error() string {
+	if e == nil || e.Message == "" {
 		return "Forge response uncertain; retry original operation"
 	}
-	return fmt.Sprintf("Forge HTTP %d", e.status)
+	return e.Message
 }
+
+func errorCode(value string) string {
+	if value == "" || len(value) > 100 || value[0] < 'a' || value[0] > 'z' {
+		return "http_error"
+	}
+	for _, c := range value[1:] {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return "http_error"
+		}
+	}
+	return value
+}
+
+func errorText(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 1024 {
+		return fallback
+	}
+	lower := strings.ToLower(value)
+	for _, marker := range []string{"bearer ", "worker_token", "admin_token", "execution_token", "attempt_id", "execution_id", "claim_uid", "credential", "secret", "token"} {
+		if strings.Contains(lower, marker) {
+			return fallback
+		}
+	}
+	return strings.ReplaceAll(value, "Bearer ", "Bearer [REDACTED]")
+}
+
+func errorData(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	clean := make(map[string]any, len(value))
+	for key, child := range value {
+		lower := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
+		if strings.Contains(lower, "token") || strings.Contains(lower, "attempt") || strings.Contains(lower, "execution_id") || strings.Contains(lower, "claim_uid") || strings.Contains(lower, "credential") || strings.Contains(lower, "secret") {
+			continue
+		}
+		switch nested := child.(type) {
+		case map[string]any:
+			if safe := errorData(nested); safe != nil {
+				clean[key] = safe
+			}
+		case []any:
+			items := make([]any, 0, len(nested))
+			for _, item := range nested {
+				if object, ok := item.(map[string]any); ok {
+					items = append(items, errorData(object))
+				} else if text, ok := item.(string); ok {
+					if safe := errorText(text, ""); safe != "" {
+						items = append(items, safe)
+					}
+				} else {
+					items = append(items, item)
+				}
+			}
+			clean[key] = items
+		case string:
+			if safe := errorText(nested, ""); safe != "" {
+				clean[key] = safe
+			}
+		default:
+			clean[key] = child
+		}
+	}
+	if len(clean) == 0 {
+		return nil
+	}
+	return clean
+}
+
+func checkoutMutation(op string) bool {
+	switch op {
+	case "issue_get", "issue_timeline", "issue_graph", "issue_list":
+		return false
+	default:
+		return true
+	}
+}
+
+func requestFailure(status int, raw []byte, fallbackCode, fallbackMessage string, mutation bool) *Error {
+	failure := &Error{Status: status, Code: fallbackCode, Message: fallbackMessage, Ambiguous: mutation && (status == 0 || status == 408 || status == 429 || status >= 500)}
+	var envelope struct {
+		Error struct {
+			Code      string         `json:"code"`
+			Message   string         `json:"message"`
+			Hint      string         `json:"hint"`
+			Data      map[string]any `json:"data"`
+			Ambiguous bool           `json:"ambiguous"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(raw, &envelope) == nil && envelope.Error.Message != "" {
+		failure.Code = errorCode(envelope.Error.Code)
+		failure.Message = errorText(envelope.Error.Message, fallbackMessage)
+		failure.Hint = errorText(envelope.Error.Hint, "")
+		failure.Data = errorData(envelope.Error.Data)
+		failure.Ambiguous = failure.Ambiguous || (mutation && envelope.Error.Ambiguous)
+	}
+	return failure
+}
+
 func ambiguous(e error) bool {
-	var r requestError
-	return errors.As(e, &r) && (r.status == 0 || r.status >= 500 || r.status == 429)
+	var r *Error
+	return errors.As(e, &r) && r.Ambiguous
 }
 func (r *Runtime) request(ctx context.Context, op string, body any, key string) (json.RawMessage, error) {
 	b, e := json.Marshal(body)
@@ -94,20 +203,21 @@ func (r *Runtime) request(ctx context.Context, op string, body any, key string) 
 	if key != "" {
 		req.Header.Set("Idempotency-Key", key)
 	}
+	mutation := checkoutMutation(op)
 	resp, e := r.client.Do(req)
 	if e != nil {
-		return nil, requestError{}
+		return nil, requestFailure(0, nil, "transport_unknown", "Forge response uncertain; retry original operation", mutation)
 	}
 	defer resp.Body.Close()
 	raw, e := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
 	if e != nil || len(raw) > 8<<20 {
-		return nil, requestError{}
+		return nil, requestFailure(0, nil, "invalid_response", "Forge response was incomplete; inspect state before retrying", mutation)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, requestError{resp.StatusCode}
+		return nil, requestFailure(resp.StatusCode, raw, "http_error", "Forge request was rejected", mutation)
 	}
 	if !json.Valid(raw) {
-		return nil, requestError{}
+		return nil, requestFailure(0, nil, "invalid_response", "Forge returned an unreadable response; inspect state before retrying", mutation)
 	}
 	return raw, nil
 }
@@ -124,11 +234,11 @@ func (r *Runtime) setLease(raw []byte, started time.Time, acquire bool) error {
 		} `json:"lease"`
 	}
 	if json.Unmarshal(raw, &v) != nil || v.Lease.Claim == "" || v.Lease.Issue == "" || v.Now.IsZero() || v.Lease.Expires.IsZero() {
-		return requestError{}
+		return requestFailure(0, nil, "invalid_response", "Forge lease response was incomplete; inspect state before retrying", true)
 	}
 	if acquire {
 		if !v.Granted || v.Token == "" || v.Execution == "" {
-			return requestError{}
+			return requestFailure(0, nil, "invalid_response", "Forge lease response was incomplete; inspect state before retrying", true)
 		}
 		r.proof = v.Token
 		r.claim = v.Lease.Claim

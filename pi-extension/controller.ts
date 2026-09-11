@@ -4,6 +4,9 @@ import { performance } from "node:perf_hooks";
 import { loadConfig, validateTTL, validateURL, type ForgeConfig } from "./config.ts";
 import { validateParams, type ToolName } from "./schemas.ts";
 import { directFetch } from "./direct-fetch.ts";
+import { errorCode, ForgeError } from "./errors.ts";
+
+export { ForgeError } from "./errors.ts";
 
 export interface Clock {
   /** Monotonic milliseconds, never Date.now(). */
@@ -41,6 +44,7 @@ const realClock: Clock = {
   clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
 };
 const editTools = new Set(["edit", "write", "bash", "apply_patch"]);
+const mutationTools = new Set(["issue_claim", "issue_renew", "issue_release", "issue_close", "issue_create", "issue_comment", "issue_link"]);
 const secretKey = /^(execution[_-]?token|worker[_-]?token|authorization|x-forge-execution|token)$/i;
 const privateKey = /^(execution[_-]?id|attempt[_-]?id)$/i;
 const object = (value: unknown): ObjectJSON => value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectJSON : {};
@@ -49,14 +53,6 @@ function stable(value: any): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
-}
-
-/** Only sanitized properties are attached to errors; no response/request/cause. */
-export class ForgeError extends Error {
-  constructor(public readonly code: string, message: string, public readonly status = 0, public readonly ambiguous = false) {
-    super(`${code}: ${message}`);
-    this.name = "ForgeError";
-  }
 }
 
 /** A single worker runtime (Pi factory or CLI session broker). No persistence or
@@ -247,7 +243,10 @@ export class Controller {
     if (this.#mode === "stopped") throw new ForgeError("runtime_stopped", "Forge runtime stopped");
   }
   #safeMessage(error: unknown): string {
-    return error instanceof ForgeError ? this.sanitize(error.message) : "Forge operation unavailable; stop editing and retry after checking connectivity";
+    if (!(error instanceof ForgeError)) return "Forge operation unavailable; stop editing and retry after checking connectivity";
+    const prefix = `${error.code}: `;
+    const message = error.message.startsWith(prefix) ? error.message.slice(prefix.length) : error.message;
+    return this.sanitize(message);
   }
   #stop(reason: string, lost = false) {
     if (this.#mode === "stopped") return;
@@ -453,6 +452,8 @@ export class Controller {
 
   async #request(name: ToolName, body: ObjectJSON, options: { token?: string; key?: string; signal?: AbortSignal; detached?: boolean; timeout?: number } = {}): Promise<{ body: ObjectJSON; started: number }> {
     const started = this.#clock.now();
+    const mutation = mutationTools.has(name);
+    const responseAmbiguous = (status: number) => mutation && (status === 0 || status === 408 || status === 429 || status >= 500);
     const controller = new AbortController();
     const signals = [options.signal, ...(options.detached ? [] : [this.#abort.signal])].filter((s): s is AbortSignal => !!s);
     const abort = () => controller.abort();
@@ -461,7 +462,7 @@ export class Controller {
     const timer = setTimeout(abort, options.timeout ?? this.#timeout);
     let rejectAbort: () => void = () => {};
     const aborted = new Promise<never>((_, reject) => {
-      rejectAbort = () => reject(new ForgeError("ambiguous_request", "Request outcome ambiguous (network/timeout/cancel); retry the original operation", 0, true));
+      rejectAbort = () => reject(new ForgeError("ambiguous_request", "Request outcome ambiguous (network/timeout/cancel); retry the original operation", 0, mutation));
       controller.signal.addEventListener("abort", rejectAbort, { once: true });
       if (controller.signal.aborted) rejectAbort();
     });
@@ -476,14 +477,20 @@ export class Controller {
         });
         let data: ObjectJSON;
         try { data = object(await response.json()); }
-        catch { throw new ForgeError("ambiguous_response", "Unreadable response; retry original operation", response.status, true); }
+        catch { throw new ForgeError("ambiguous_response", "Unreadable response; retry original operation", response.status, responseAmbiguous(response.status)); }
         this.sanitize(data); // Register echoed secrets before constructing any error.
         if (!response.ok) {
-          const err = this.sanitize(object(data.error));
-          const ambiguous = response.status >= 500 || response.status === 408 || response.status === 429;
-          throw new ForgeError(requiredString(err.code) ? err.code : "http_error",
-            `${requiredString(err.message) ? err.message : "Forge rejected request"}${err.hint ? ` (${err.hint})` : ""}${ambiguous ? "; outcome ambiguous: retry original operation" : ""}`,
-            response.status, ambiguous);
+          const safeData = this.sanitize(data);
+          const err = object(safeData.error);
+          const ambiguous = err.ambiguous === true || responseAmbiguous(response.status);
+          const details = {
+            ...(requiredString(err.hint) ? { hint: err.hint } : {}),
+            ...(err.data && typeof err.data === "object" && !Array.isArray(err.data) ? { data: err.data } : {}),
+          };
+          const message = requiredString(err.message) ? err.message : "Forge rejected request";
+          throw new ForgeError(errorCode(err.code, "http_error"),
+            ambiguous ? `${message}; outcome ambiguous: retry original operation` : message,
+            response.status, ambiguous, details);
         }
         return data;
       };
@@ -493,7 +500,7 @@ export class Controller {
     } catch (error) {
       if (error instanceof ForgeError) throw error;
       // Native fetch failures may contain URLs/headers; never expose their cause.
-      throw new ForgeError("ambiguous_request", "Request outcome ambiguous (network/timeout/cancel); retry original operation", 0, true);
+      throw new ForgeError("ambiguous_request", "Request outcome ambiguous (network/timeout/cancel); retry the original operation", 0, mutation);
     } finally {
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", rejectAbort);

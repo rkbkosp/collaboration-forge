@@ -168,6 +168,14 @@ func TestAuthenticationFailsClosed(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("authorized list: %d %s", w.Code, w.Body.String())
 	}
+	unauthorized := request(t, s, "GET", "/api/v1/projects", "", "")
+	if unauthorized.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("unauthorized content type: %s", unauthorized.Header().Get("Content-Type"))
+	}
+	var envelope forgeErrorEnvelope
+	if err := json.Unmarshal(unauthorized.Body.Bytes(), &envelope); err != nil || envelope.Status != http.StatusUnauthorized || envelope.Error.Code != "auth_required" {
+		t.Fatalf("unauthorized envelope: %d %s", unauthorized.Code, unauthorized.Body.String())
+	}
 }
 
 func TestHostAccessRequiresPrivateGrant(t *testing.T) {

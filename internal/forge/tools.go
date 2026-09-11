@@ -468,17 +468,21 @@ type toolResponse struct {
 
 func (r *toolResponse) success() bool { return r.status >= 200 && r.status < 300 }
 func (r *toolResponse) serve(w http.ResponseWriter) {
+	body := r.body
 	for _, name := range []string{"Content-Type", "ETag", "Location", "Retry-After", "X-Kata-Project-Name"} {
 		if value := r.header.Get(name); value != "" {
 			w.Header().Set(name, value)
 		}
 	}
-	if w.Header().Get("Content-Type") == "" {
+	if !r.success() {
+		body = normalizeForgeError(r.status, body)
+		w.Header().Set("Content-Type", "application/json")
+	} else if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", "application/json")
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(r.status)
-	_, _ = w.Write(r.body)
+	_, _ = w.Write(body)
 }
 func (r *toolResponse) withFields(fields map[string]any) *toolResponse {
 	var object map[string]json.RawMessage
@@ -500,15 +504,5 @@ func (r *toolResponse) withFields(fields map[string]any) *toolResponse {
 	return r
 }
 func toolError(status int, code, message string) *toolResponse {
-	body, _ := json.Marshal(struct {
-		Status int `json:"status"`
-		Error  struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}{Status: status, Error: struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}{Code: code, Message: message}})
-	return &toolResponse{status: status, header: make(http.Header), body: body}
+	return &toolResponse{status: status, header: make(http.Header), body: forgeErrorBody(status, code, message, "", nil)}
 }

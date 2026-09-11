@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { launchCodex } from './launcher.ts';
 import { codexIdentity,codexTool } from './facade.ts';
 import { codexRPC,CodexError } from './transport.ts';
+import { forgeErrorEnvelope } from '../pi-extension/errors.ts';
 import { hookConfiguration } from './bundle.ts';
 const HELP=`forge codex [Codex arguments...]        launch a fresh supervised instance
 forge codex status | retry | pause | unpause
@@ -36,5 +37,10 @@ export async function codexCommand(args:string[],env:NodeJS.ProcessEnv=process.e
    output(result);return 0;
   }
   return await launchCodex(args,env);
- }catch(e){const code=e instanceof CodexError?e.code:'codex_command_failed';const ambiguous=e instanceof CodexError&&e.ambiguous;process.stderr.write(JSON.stringify({error:{code,ambiguous,...(code==='codex_configuration'?{hint:'Set FORGE_URL to the loopback service and FORGE_WORKER_TOKEN_FILE to an owned 0600 worker credential file; check FORGE_TTL_SECONDS (60..3600).'}:{})}})+'\n');return ambiguous?3:code==='usage'?2:1;}
+ }catch(e){
+  const error=e instanceof CodexError?e:new CodexError('codex_command_failed');
+  const hint=error.hint??(error.code==='codex_configuration'?'Set FORGE_URL to the loopback service and FORGE_WORKER_TOKEN_FILE to an owned 0600 worker credential file; check FORGE_TTL_SECONDS (60..3600).':undefined);
+  process.stderr.write(JSON.stringify(forgeErrorEnvelope({code:error.code,message:error.message,status:error.status,ambiguous:error.ambiguous,hint,data:error.data}))+'\n');
+  return error.ambiguous?3:error.code==='usage'?2:1;
+ }
 }

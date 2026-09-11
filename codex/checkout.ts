@@ -3,6 +3,7 @@ import {resolve} from 'node:path';
 import {setTimeout as delay} from 'node:timers/promises';
 import {codexTool} from './facade.ts';
 import {CodexError} from './transport.ts';
+import {forgeErrorEnvelope} from '../pi-extension/errors.ts';
 export const CHECKOUT_HELP=`forge checkout ISSUE (--ref COMMIT | --dirty) [--source REPO] [--no-wait]
 forge checkout ISSUE --recover WORKSPACE_ID (--dirty | --ref COMMIT)
 forge checkout list [ISSUE]
@@ -36,5 +37,10 @@ export async function runCheckout(args:string[],env:NodeJS.ProcessEnv=process.en
 export async function checkoutCommand(args:string[]):Promise<number>{
  if(args.length===1&&args[0]==='--help'){process.stdout.write(CHECKOUT_HELP);return 0;}
  try{const r=await runCheckout(args);process.stdout.write(JSON.stringify(r)+'\n');return r.wait_timed_out?3:['failed','orphaned','archive_pending'].includes(r.state)?1:0;}
- catch(e){const code=e instanceof CodexError?e.code:'checkout_failed';process.stderr.write(JSON.stringify({error:{code,ambiguous:e instanceof CodexError&&e.ambiguous,hint:code==='checkout_usage'?'Use forge checkout --help': 'Inspect forge checkout list and forge codex status before retrying; keep existing workspace files.'}})+'\n');return code==='checkout_usage'?2:e instanceof CodexError&&e.ambiguous?3:1;}
+ catch(e){
+  const error=e instanceof CodexError?e:new CodexError('checkout_failed');
+  const hint=error.hint??(error.code==='checkout_usage'?'Use forge checkout --help':'Inspect forge checkout list and forge codex status before retrying; keep existing workspace files.');
+  process.stderr.write(JSON.stringify(forgeErrorEnvelope({code:error.code,message:error.message,status:error.status,ambiguous:error.ambiguous,hint,data:error.data}))+'\n');
+  return error.code==='checkout_usage'?2:error.ambiguous?3:1;
+ }
 }

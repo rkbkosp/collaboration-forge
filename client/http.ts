@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Controller, ForgeError } from '../pi-extension/controller.ts';
+import { errorCode } from '../pi-extension/errors.ts';
 import { validateURL } from '../pi-extension/config.ts';
 import { directFetch } from '../pi-extension/direct-fetch.ts';
 
@@ -22,9 +23,9 @@ export class ClientHTTP {
       throw new ForgeError('invalid_path','Use an absolute local API path without traversal');
     }
     if (!['GET','POST','PATCH','DELETE','PUT'].includes(method)) throw new ForgeError('invalid_method','Unsupported HTTP method');
-    const uncertain = method !== 'GET';
+    const mutation = method !== 'GET' && path !== '/forge/v1/tools/issue_timeline';
     let receivedStatus=0;
-    const ambiguous=()=>uncertain && !(receivedStatus>=400 && receivedStatus<500);
+    const ambiguous=()=>mutation && (receivedStatus===0 || receivedStatus===408 || receivedStatus===429 || receivedStatus>=500);
     try {
       const headers:Record<string,string>={'X-Forge-Session':this.#session,'Content-Type':'application/json'};
       if(this.#token) headers.Authorization='Bearer '+this.#token;
@@ -46,9 +47,17 @@ export class ClientHTTP {
       const raw=Buffer.concat(chunks).toString('utf8');
       let decoded: unknown;
       try { decoded=raw ? JSON.parse(raw) : {}; }
-      catch { if(response.ok)throw new ForgeError('invalid_response','Server returned non-JSON success; inspect state before repeating a mutation',response.status,uncertain); }
+      catch { if(response.ok)throw new ForgeError('invalid_response','Server returned non-JSON success; inspect state before repeating a mutation',response.status,mutation); }
       const result:any=this.#redactor.sanitize(decoded && typeof decoded==='object' ? decoded : {});
-      if(!response.ok) throw new ForgeError(String(result.error?.code ?? 'http_error'),String(result.error?.message ?? `HTTP ${response.status}`),response.status,uncertain && response.status>=500);
+      if(!response.ok) {
+        const body = result.error && typeof result.error === 'object' && !Array.isArray(result.error) ? result.error : {};
+        const details = {
+          ...(typeof body.hint === 'string' && body.hint ? { hint: body.hint } : {}),
+          ...(body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? { data: body.data } : {}),
+        };
+        throw new ForgeError(errorCode(body.code, 'http_error'), String(body.message ?? `HTTP ${response.status}`), response.status,
+          body.ambiguous === true || ambiguous(), details);
+      }
       return result;
     } catch(error) {
       if(error instanceof ForgeError)throw error;

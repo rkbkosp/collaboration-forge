@@ -32,8 +32,7 @@ func main() {
 		output = os.Stdout
 	}
 	if err := run(ctx, os.Args[1:], output); err != nil {
-		fmt.Fprintln(os.Stderr, "forged:", err)
-		os.Exit(1)
+		os.Exit(writeForgedError(err))
 	}
 }
 

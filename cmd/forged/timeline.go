@@ -84,7 +84,7 @@ func runTimeline(ctx context.Context, args []string, out io.Writer) error {
 			return readFailure(errors.New("timeline response exceeds 8 MiB"))
 		}
 		if response.StatusCode != http.StatusOK {
-			return readFailure(fmt.Errorf("timeline request failed: HTTP %d", response.StatusCode))
+			return readFailure(parseForgedHTTPError(response.StatusCode, raw, "timeline_request_failed", "Timeline request failed"))
 		}
 		var page struct {
 			Lease         json.RawMessage                     `json:"lease"`

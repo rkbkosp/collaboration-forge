@@ -3,6 +3,8 @@ package checkout
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,29 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRuntimePreservesSafeStructuredErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		fmt.Fprint(w, `{"status":409,"error":{"code":"claim_denied","message":"lease is held","hint":"wait","data":{"cleanup_pending":false,"execution_token":"private"}}}`)
+	}))
+	defer server.Close()
+	rt, err := NewRuntime(server.URL, strings.Repeat("w", 32), 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Shutdown()
+	err = rt.Claim(context.Background(), "abcd")
+	var structured *Error
+	if !errors.As(err, &structured) || structured.Code != "claim_denied" || structured.Status != http.StatusConflict || structured.Hint != "wait" || structured.Ambiguous || structured.Data["execution_token"] != nil {
+		t.Fatalf("structured error lost or unsafe: %#v", err)
+	}
+	_, err = rt.request(context.Background(), "issue_get", map[string]any{"ref": "abcd"}, "")
+	if !errors.As(err, &structured) || structured.Ambiguous {
+		t.Fatalf("read rejection became ambiguous: %#v", err)
+	}
+}
 
 func TestRuntimeAcquireRetryIdentityAndCloseReceipt(t *testing.T) {
 	var mu sync.Mutex

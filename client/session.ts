@@ -3,6 +3,7 @@ import type { Stats } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { dirname, isAbsolute, join, normalize } from "node:path";
 import { Controller, ForgeError } from "../pi-extension/controller.ts";
+import { errorCode, forgeErrorEnvelope } from "../pi-extension/errors.ts";
 import { toolSchemas, type ToolName } from "../pi-extension/schemas.ts";
 
 const MAX_REQUEST = 1024 * 1024;
@@ -17,7 +18,8 @@ type Request = { op: string; params?: unknown };
 type Extra = (op: string, params: unknown) => Promise<unknown>;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const sameFile = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino;
-const failure = (code: string, message: string, ambiguous = false) => new ForgeError(code, message, 0, ambiguous);
+const failure = (code: string, message: string, ambiguous = false, status = 0, options: { hint?: string; data?: Record<string, unknown> } = {}) =>
+  new ForgeError(code, message, status, ambiguous, options);
 
 function checkPath(path: string) {
   if (typeof path !== "string" || !isAbsolute(path) || path.includes("\0") || normalize(path) !== path || Buffer.byteLength(path) > 100 || dirname(path) === path) {
@@ -45,19 +47,14 @@ function checkRequest(value: unknown): asserts value is Request {
     throw failure("invalid_request", "Require one request object with op and optional tool params; control operations take no params");
   }
 }
-function safeError(error: unknown, controller?: Controller) {
-  const safe = error instanceof ForgeError ? {
-    code: error.code,
-    message: error.message.startsWith(`${error.code}: `) ? error.message.slice(error.code.length + 2) : error.message,
-    ...(error.ambiguous ? { ambiguous: true } : {}),
-  } : { code: "session_error", message: "Session operation unavailable" };
-  return controller ? controller.sanitize(safe) : safe;
-}
 function responseLine(result: unknown, error: unknown, controller: Controller): string {
   let line: string;
   try {
-    line = JSON.stringify(error ? { ok: false, error: safeError(error, controller) } : { ok: true, result: controller.sanitize(result ?? null) }) + "\n";
-  } catch { line = JSON.stringify({ ok: false, error: { code: "session_error", message: "Session operation unavailable" } }) + "\n"; }
+    const envelope = error instanceof ForgeError
+      ? forgeErrorEnvelope(error, (value) => controller.sanitize(value))
+      : { error: { code: "session_error", message: "Session operation unavailable", ambiguous: false } };
+    line = JSON.stringify(error ? { ok: false, ...envelope } : { ok: true, result: controller.sanitize(result ?? null) }) + "\n";
+  } catch { line = JSON.stringify({ ok: false, error: { code: "session_error", message: "Session operation unavailable", ambiguous: false } }) + "\n"; }
   if (Buffer.byteLength(line) > MAX_RESPONSE) {
     return JSON.stringify({ ok: false, error: { code: "response_too_large", message: "Session response exceeds size limit; check state before retrying", ambiguous: true } }) + "\n";
   }
@@ -166,7 +163,7 @@ export async function startSession(socketPath: string, controller: Controller, e
       received = true; chunks = []; socket.pause();
       deadline(REQUEST_TIMEOUT, () => {
         abort.abort();
-        reply(undefined, failure("session_timeout", "Session operation timed out; check state before retrying", true));
+        reply(undefined, failure("session_timeout", "Session operation timed out; check state before retrying", mutationOps.has(request.op)));
       });
       const dispatch = async () => {
         if (executionOps.has(request.op) || request.op === "retry") return execute(request, abort.signal);
@@ -311,10 +308,17 @@ export async function requestSession(socketPath: string, request: Request): Prom
           finish(undefined, response.result); return;
         }
         const error = response.error;
-        if (response.ok !== false || Object.keys(response).some((key) => key !== "ok" && key !== "error") || !record(error) ||
-            typeof error.code !== "string" || !error.code || typeof error.message !== "string" ||
-            (error.ambiguous !== undefined && typeof error.ambiguous !== "boolean") || Object.keys(error).some((key) => !["code", "message", "ambiguous"].includes(key))) throw new Error();
-        finish(failure(error.code, error.message, error.ambiguous === true));
+        const responseStatus = response.status;
+        const responseCode = record(error) ? errorCode(error.code, "") : "";
+        if (response.ok !== false || Object.keys(response).some((key) => !["ok", "error", "status"].includes(key)) || !record(error) ||
+            !responseCode || typeof error.message !== "string" ||
+            (responseStatus !== undefined && (typeof responseStatus !== "number" || !Number.isInteger(responseStatus) || responseStatus < 100 || responseStatus > 599)) ||
+            (error.ambiguous !== undefined && typeof error.ambiguous !== "boolean") ||
+            (error.hint !== undefined && typeof error.hint !== "string") ||
+            (error.data !== undefined && (!record(error.data) || Array.isArray(error.data))) ||
+            Object.keys(error).some((key) => !["code", "message", "ambiguous", "hint", "data"].includes(key))) throw new Error();
+        finish(failure(responseCode, error.message, error.ambiguous === true, typeof responseStatus === "number" ? responseStatus : 0,
+          { ...(typeof error.hint === "string" ? { hint: error.hint } : {}), ...(record(error.data) ? { data: error.data } : {}) }));
       } catch { finish(failure("invalid_response", "Invalid session response; check state before retrying", uncertain())); }
     });
   });

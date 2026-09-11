@@ -219,7 +219,7 @@ func (s *Server) authenticatedHandler() http.Handler {
 		workerMatched := subtle.ConstantTimeCompare(got[:], worker[:]) == 1 && s.config.WorkerToken != ""
 		if len(headers) != 1 || !found || !strings.EqualFold(scheme, "Bearer") || (!matched && !workerMatched) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="forge"`)
-			http.Error(w, "authentication required", http.StatusUnauthorized)
+			writeForgeError(w, http.StatusUnauthorized, "auth_required", "authentication required")
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
@@ -237,11 +237,11 @@ func (s *Server) authenticatedHandler() http.Handler {
 			return
 		}
 		if !matched {
-			http.Error(w, "workers must use the typed Forge façade", http.StatusForbidden)
+			writeForgeError(w, http.StatusForbidden, "worker_facade_required", "workers must use the typed Forge façade")
 			return
 		}
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
-			http.NotFound(w, r)
+			writeForgeError(w, http.StatusNotFound, "not_found", "resource not found")
 			return
 		}
 		ctx := context.WithValue(r.Context(), supervisorGrantKey{}, true)

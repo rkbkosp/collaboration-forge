@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { StringEnum } from "@earendil-works/pi-ai";
+import { ForgeError } from "./errors.ts";
 
 const text = () => Type.String({ minLength: 1 });
 const ref = text();
@@ -38,14 +39,14 @@ export type ToolName = keyof typeof toolSchemas;
 export function validateParams(name: ToolName, params: unknown): asserts params is Record<string, unknown> {
   if (!Object.hasOwn(toolSchemas, name) || !Check(toolSchemas[name], params)) {
     // Avoid echoing arbitrary model fields (including attempted credential inputs).
-    throw new Error("Invalid Forge tool parameters; use only the published schema");
+    throw new ForgeError("usage", "Invalid Forge tool parameters; use only the published schema");
   }
   if (name === "issue_close") {
     const fields: Record<string, string> = { commit: "sha", pr: "url", test: "command", "reviewed-paths": "paths", external: "account", "no-change-audit": "rationale", "duplicate-of": "issue_ref", "superseded-by": "issue_ref" };
     for (const item of ((params as Record<string, unknown>).evidence ?? []) as Record<string, unknown>[]) {
       const field = fields[String(item.type)];
       if (!item[field] || Object.keys(item).some((key) => key !== "type" && key !== field)) {
-        throw new Error("Each typed evidence item must contain only type and its corresponding evidence field");
+        throw new ForgeError("usage", "Each typed evidence item must contain only type and its corresponding evidence field");
       }
     }
   }

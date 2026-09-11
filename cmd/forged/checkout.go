@@ -126,19 +126,17 @@ func runCheckout(ctx context.Context, args []string, out io.Writer) (resultErr e
 	}
 	server := &http.Server{ReadHeaderTimeout: 3 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" || !strings.HasPrefix(r.URL.Path, "/") || strings.Contains(strings.TrimPrefix(r.URL.Path, "/"), "/") {
-			http.Error(w, "invalid tool request", 400)
+			writeForgedHTTPError(w, http.StatusBadRequest, "invalid_request", "Invalid execution tool request")
 			return
 		}
 		body, e := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 		if e != nil {
-			http.Error(w, "request exceeds limit", 400)
+			writeForgedHTTPError(w, http.StatusBadRequest, "request_too_large", "Execution tool request exceeds the size limit")
 			return
 		}
 		reply, e := rt.Tool(r.Context(), strings.TrimPrefix(r.URL.Path, "/"), body)
-		w.Header().Set("Content-Type", "application/json")
 		if e != nil {
-			w.WriteHeader(409)
-			json.NewEncoder(w).Encode(map[string]string{"error": e.Error()})
+			writeForgedHTTPFailure(w, http.StatusConflict, forgedErrorFrom(e))
 			return
 		}
 		w.Write(reply)
@@ -243,7 +241,7 @@ func runExecution(ctx context.Context, args []string, out io.Writer) error {
 		return errors.New("invalid runtime response")
 	}
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("execution tool rejected: %s", strings.TrimSpace(string(b)))
+		return parseForgedHTTPError(resp.StatusCode, b, "execution_tool_rejected", "Execution tool request was rejected")
 	}
 	_, e = fmt.Fprintln(out, string(b))
 	return e

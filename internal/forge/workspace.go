@@ -34,7 +34,7 @@ func (h *toolHandler) workspace(w http.ResponseWriter, r *http.Request, runtime 
 	if !ok {
 		return
 	}
-	if !isHex(in.SnapshotID, 32) || !(isHex(in.BaseCommit, 20) || isHex(in.BaseCommit, 32)) || !isHex(in.RepositoryID, 32) || !toolUUID(in.WorkspaceID, "47") || (in.State != "ready" && in.State != "failed") || (in.SourceKind != "dirty" && in.SourceKind != "commit") || len(in.Device) > 256 || len(in.Location) > 4096 || len(in.SnapshotLocation) > 4096 {
+	if !isHex(in.SnapshotID, 32) || !(isHex(in.BaseCommit, 20) || isHex(in.BaseCommit, 32)) || !isHex(in.RepositoryID, 32) || !toolUUID(in.WorkspaceID, "47") || (in.State != "preparing" && in.State != "ready" && in.State != "failed") || (in.SourceKind != "dirty" && in.SourceKind != "commit") || len(in.Device) > 256 || len(in.Location) > 4096 || len(in.SnapshotLocation) > 4096 {
 		toolError(400, "validation", "invalid workspace observation").serve(w)
 		return
 	}

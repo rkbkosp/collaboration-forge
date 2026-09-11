@@ -42,3 +42,86 @@ with separate staged/working versions, source-index byte preservation, removal
 of the source repository, corruption refusal, special-index refusal, nested
 repositories, path shape changes, unusual filenames and injected concurrent
 source modification. Tests create isolated temporary Git repositories only.
+
+## CLI
+
+Build with `go build -o bin/forged ./cmd/forged`. Start the authenticated loopback
+service as documented in README, then launch a CLI-aware, noninteractive Agent command:
+
+```sh
+bin/forged checkout --url http://127.0.0.1:7347 \
+  --token-file /private/forge/worker-token \
+  --source /work/my-repo --dirty \
+  --store /private/forge-snapshots --dest /work/execution-001 \
+  ISSUE_REF -- AGENT_COMMAND ARGUMENTS
+```
+
+All flags precede ISSUE_REF. `--dirty` explicitly selects the entire repository's
+current dirty state. Alternatively use `--ref COMMIT --store STORE`, or
+`--snapshot /private/forge-snapshots/SHA256` to recover the same immutable starting
+state into a NEW `--dest`. A restored worktree is `DEST/worktree`; its private
+object store is `DEST/repository.git`. Destination parents must already exist.
+Artifacts and worktrees stay on disk after success, failure and cancellation.
+There is no automatic destructive garbage collection.
+
+The parent CLI claims first, automatically renews (TTL default 300 seconds),
+publishes a `preparing` workspace observation after capture, restores and verifies
+content, publishes `ready`, confirms the lease again, and starts the command with
+cwd set to the worktree. It releases best-effort on exit. An Agent exit code of
+zero does NOT close the Issue. Failed stages append a bounded mechanical failure
+observation when the service is reachable. No snapshot content is uploaded.
+
+The child receives `FORGE_CLI`, `FORGE_EXECUTION_SOCKET` and `FORGE_ISSUE`, but no
+worker token, execution proof or attempt. These environment variables describe a
+live parent runtime, not persistent authority. The Agent must use this runtime
+for execution operations; do not also load the independent Forge Pi extension or
+start another claim-owning client against the same Issue.
+
+Agent integration commands (call `guard` before editing or launching a mutation):
+
+```sh
+"$FORGE_CLI" execution guard
+"$FORGE_CLI" execution issue_get
+"$FORGE_CLI" execution issue_comment '{"body":"Plan or finding"}'
+"$FORGE_CLI" execution issue_close '{"reason":"done","message":"Detailed completion result with sufficient substance.","evidence":[{"type":"test","command":"go test ./..."}]}'
+"$FORGE_CLI" execution retry
+```
+
+`execution TOOL -` accepts JSON on stdin. `state`, Issue list/get/timeline/graph,
+create/comment/link are also supported. Issue-scoped calls default to the claimed
+Issue. Close is always bound to that Issue and uses a stable private retry key.
+After uncertain close, only `retry` resubmits the retained original request; work
+is blocked. The socket does not expose claim, workspace registration, credentials,
+arbitrary native API routes, or supervisor operations. It lives in a private
+0700 temporary directory with a 0600 Unix socket and disappears on parent exit.
+
+Lease confirmation failure stops the child process group best-effort. Parent
+SIGKILL cannot guarantee child termination: TTL fences server completion, and
+Agent-side `guard` fails once its parent socket disappears. This remains trusted
+same-user collaboration, not a malicious-process sandbox. Socket possession lets
+same-user callers act through that live runtime; the Agent command must implement
+this CLI contract. This does not transparently retrofit arbitrary Agents or Pi
+extensions which own an independent execution lifecycle.
+
+Workspace observations are fixed-format Kata comments, requiring a signed current
+execution credential at the server. The server derives execution/claim attribution
+and idempotency keys. They record a lease observation, not an atomic lease+comment
+transaction; live authority always comes from Kata's lease. Like other trusted
+local client inputs, snapshot metadata is not an independently attested filesystem
+measurement. No migrations, scheduler, PR/Change domain or private SQL were added.
+
+Runtime tests began with missing APIs and a 404 for registration. A malformed mock
+renew response then correctly blocked close; the fixture was corrected to return
+an actual lease. Real HTTP/SQLite plus Agent subprocess tests cover dirty checkout,
+source preservation, mechanical registration and exact close/release. Cancellation
+retains the worktree; a new runtime restores the snapshot and claims anew. Separate
+network tests cover acquire identity reuse, ambiguous close retry, loss fencing,
+redaction and redirect refusal. Automatic test-output capture remains future work;
+close evidence above is still an Agent statement under the existing Kata contract.
+
+The launcher currently targets noninteractive/headless commands. Interactive TUI
+terminal foreground/PTY integration and automatic loading of Agent adapters are
+not part of this checkout contract. A separate real-binary acceptance run also
+passed `forged serve` + `checkout` + `execution` with a shell Agent, staged/dirty
+assertions, preparing/ready timeline records and guarded close/release. Its local
+summary is `/tmp/forge-checkout-e2e.log` (temporary; integration tests are durable).

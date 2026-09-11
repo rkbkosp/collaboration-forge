@@ -17,6 +17,20 @@ test('standalone help/version and failures have stable exit codes',async()=>{
  assert.equal((await cli(['issue','create','--unknown-secret','do-not-echo'])).code,2);
  assert.equal((await cli(['issue','create','--unknown-secret','do-not-echo'])).stderr.includes('do-not-echo'),false);
 });
+test('human mode reuses stock arguments and has explicit JSON escape hatch',async()=>{
+ assert.match((await cli(['human','--help'])).stdout,/structured human-readable output/);
+ const human=await cli(['human','skill','path']);
+ assert.equal(human.code,0);assert.match(human.stdout,/Forge skill path\n\s+path:/);assert.equal(human.stdout.trimStart().startsWith('{'),false);
+ const json=await cli(['human','--format','json','skill','path']);
+ assert.equal(json.code,0);const parsed=JSON.parse(json.stdout);assert.equal(typeof parsed.path,'string');assert.match(parsed.path,/skills[\\/]collab-forge-client[\\/]$/);
+});
+test('local schema failures are usage errors with a stable envelope',async()=>{
+ const result=await cli(['issue','list','--status','bogus']);
+ assert.equal(result.code,2);
+ const error=JSON.parse(result.stderr);
+ assert.equal(error.error.code,'usage');assert.equal(error.error.message,'Invalid Forge tool parameters; use only the published schema');
+ assert.equal(error.error.ambiguous,false);assert.equal(error.error.message.includes('usage:'),false);
+});
 test('skill installation is self-contained and never overwrites a target',async()=>{
  const dir=await mkdtemp('/tmp/forge-skill-');const target=join(dir,'collab-forge-client');
  try{

@@ -8,14 +8,18 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Controller, ForgeError } from '../pi-extension/controller.ts';
+import { forgeErrorEnvelope } from '../pi-extension/errors.ts';
 import { loadConfig, validateURL } from '../pi-extension/config.ts';
-import { toolSchemas, type ToolName } from '../pi-extension/schemas.ts';
+import { toolSchemas, type ToolName, validateParams } from '../pi-extension/schemas.ts';
 import { ClientHTTP } from './http.ts';
 import { startSession, requestSession } from './session.ts';
 
-const stringFlags = ['url','worker-token-file','admin-token-file','socket','session-id','ttl','data','data-file','title','body','body-file','status','limit','depth','reason','purpose','message','message-file','evidence','evidence-file','if-match','idempotency-key','after-id','max-pages','owner','priority','confirm','type','to-ref','target'];
-const boolFlags = ['help','version','all','clear-owner'];
+const stringFlags = ['url','worker-token-file','admin-token-file','socket','session-id','ttl','data','data-file','title','body','body-file','status','limit','depth','reason','purpose','message','message-file','evidence','evidence-file','if-match','idempotency-key','after-id','max-pages','owner','priority','confirm','type','to-ref','target','format'];
+const boolFlags = ['help','version','all','clear-owner','json'];
 const HELP = `Forge client — JSON output; credentials are FILE paths, never token arguments.
+
+forge human <same client arguments> [--format human|json]
+  Render deterministic human-readable output; --json selects JSON explicitly.
 
 forge codex [Codex arguments...]  (daemon renewal + lifecycle hooks)
 forge codex --help-forge
@@ -57,6 +61,17 @@ Files may be '-' for stdin. Close evidence is a typed JSON array, not prose.
 Exit: 0 success, 1 local/HTTP error, 2 usage, 3 ambiguous mutation, 4 guard blocked.
 Trusted local use only: same-UID tools can read credentials; this is not a sandbox.
 `;
+const HUMAN_HELP = `Forge human — structured human-readable output; credentials are FILE paths, never token arguments.
+
+forge human issue list [--status open|closed] [--limit N]
+forge human issue get REF | graph REF [--depth 1..10]
+forge human issue timeline REF [--after-id N] [--limit N] [--all]
+forge human admin ...
+forge human health | project
+
+Use --format json or --json for machine-readable output. The same worker,
+admin, session, and server authority rules apply as the stock forge command.
+`;
 
 function usage(message: string): never { throw new ForgeError('usage',message); }
 function integer(value: unknown, min: number, max: number): number {
@@ -81,6 +96,53 @@ async function textFile(path: string): Promise<string> {
 }
 function json(text:string): any {try{return JSON.parse(text);}catch{usage('Invalid JSON input');}}
 
+const displaySecret = /^(?:authorization|bearer|execution[_-]?token|worker[_-]?token|x-forge-execution|token|execution[_-]?id|attempt[_-]?id)$/i;
+const displayRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
+function displayScalar(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'string') return value.replace(/Bearer\s+[^\s"\\]+/gi, 'Bearer [REDACTED]').replaceAll('\n', '↵');
+  if (typeof value === 'boolean' || typeof value === 'number') return String(value);
+  return JSON.stringify(value);
+}
+function displayEntries(value: Record<string, unknown>): [string, unknown][] {
+  return Object.entries(value).filter(([key]) => !displaySecret.test(key)).sort(([a], [b]) => a.localeCompare(b));
+}
+function renderTable(values: unknown[]): string[] {
+  const rows = values.filter(displayRecord).map((value) => displayEntries(value));
+  if (!rows.length || rows.some((row) => row.some(([, child]) => child !== null && typeof child === 'object'))) return [];
+  const keys = [...new Set(rows.flatMap((row) => row.map(([key]) => key)))];
+  if (!keys.length) return [];
+  const cells = rows.map((row) => {
+    const map = new Map(row);
+    return keys.map((key) => displayScalar(map.get(key)));
+  });
+  const widths = keys.map((key, index) => Math.min(48, Math.max(key.length, ...cells.map((row) => row[index].length))));
+  const fit = (value: string, width: number) => value.length > width ? `${value.slice(0, Math.max(0, width - 1))}…` : value.padEnd(width);
+  return [
+    `  ${keys.map((key, index) => fit(key, widths[index])).join('  ')}`,
+    `  ${widths.map((width) => '-'.repeat(width)).join('  ')}`,
+    ...cells.map((row) => `  ${row.map((cell, index) => fit(cell, widths[index])).join('  ')}`),
+  ];
+}
+function renderStructured(value: unknown, indent = '  '): string[] {
+  if (Array.isArray(value)) {
+    const table = renderTable(value);
+    if (table.length) return table;
+    return value.flatMap((child, index) => [`${indent}[${index}]`, ...renderStructured(child, `${indent}  `)]);
+  }
+  if (displayRecord(value)) {
+    return displayEntries(value).flatMap(([key, child]) => {
+      if (child !== null && typeof child === 'object') return [`${indent}${key}:`, ...renderStructured(child, `${indent}  `)];
+      return [`${indent}${key}: ${displayScalar(child)}`];
+    });
+  }
+  return [`${indent}${displayScalar(value)}`];
+}
+function renderHuman(value: unknown, words: string[]): string {
+  const title = words.length ? `Forge ${words.join(' ')}` : 'Forge';
+  return [title, ...renderStructured(value), ''].join('\n');
+}
+
 export async function main(argv: string[]): Promise<number> {
   let controller: Controller | undefined;
   try {
@@ -89,11 +151,17 @@ export async function main(argv: string[]): Promise<number> {
       parsed=parseArgs({args:argv,allowPositionals:true,options:Object.fromEntries([...stringFlags.map(k=>[k,{type:'string' as const}]),...boolFlags.map(k=>[k,{type:'boolean' as const}])])});
     } catch {usage('Invalid arguments; run forge --help');}
     const f=parsed.values as Record<string,string|boolean|undefined>;
-    const words=parsed.positionals;
+    const rawWords=parsed.positionals;
+    const humanMode=rawWords[0]==='human';
+    const words=humanMode?rawWords.slice(1):rawWords;
+    const format=f.format===undefined?(f.json===true?'json':undefined):String(f.format);
+    if(format!==undefined && !['human','json'].includes(format))usage('--format must be human or json');
+    if(f.json===true && f.format!==undefined && format!=='json')usage('Choose --json or --format json');
+    if(!humanMode && (f.json===true || f.format!==undefined))usage('--json/--format is only supported with forge human');
     if(Object.entries(f).filter(([key,value])=>key.endsWith('-file') && !key.endsWith('token-file') && value==='-').length>1)usage('Only one input field may consume stdin');
     if(f.version){process.stdout.write('collab-forge client 0.1.0\n');return 0;}
-    if(f.help || !words.length){process.stdout.write(HELP);return 0;}
-    const common=['url','worker-token-file','socket','session-id','ttl'];
+    if(f.help || !words.length){process.stdout.write(humanMode?HUMAN_HELP:HELP);return 0;}
+    const common=['url','worker-token-file','socket','session-id','ttl','format','json'];
     function flags(...allowed:string[]){if(Object.keys(f).some(key=>![...common,...allowed].includes(key)))usage('Option not supported by this command');}
     function count(n:number){if(words.length!==n)usage('Incorrect positional arguments; run forge --help');}
     async function fields(allowed:string[]): Promise<Record<string,any>> {
@@ -128,7 +196,18 @@ export async function main(argv: string[]): Promise<number> {
     const sessionId=String(f['session-id'] ?? randomUUID());
     let http:ClientHTTP|undefined;
     async function worker() {
-      if(!controller){const config=await loadConfig(env);controller=new Controller(config,{sessionId});http=new ClientHTTP(config.url,config.workerToken,sessionId);}
+      if(!controller){
+        try {
+          const config=await loadConfig(env);
+          const nextController=new Controller(config,{sessionId});
+          const nextHTTP=new ClientHTTP(config.url,config.workerToken,sessionId);
+          controller=nextController;
+          http=nextHTTP;
+        } catch (error) {
+          if(error instanceof ForgeError) throw error;
+          throw new ForgeError('configuration','Forge client configuration is invalid; check FORGE_URL, FORGE_WORKER_TOKEN_FILE, and FORGE_TTL_SECONDS');
+        }
+      }
       return controller;
     }
     async function extra(op:string,params:unknown):Promise<any> {
@@ -139,17 +218,17 @@ export async function main(argv: string[]): Promise<number> {
       usage('Unsupported read operation');
     }
     async function call(op:string,params:unknown={}):Promise<any> {
+      if(!Object.hasOwn(toolSchemas,op) && !['issue_timeline','project'].includes(op))usage('Unknown worker operation');
       if(env.FORGE_CODEX_INSTANCE_ID && op.startsWith('issue_')){
         if(f.socket!==undefined||f['session-id']!==undefined)usage('Codex identity is harness-owned; do not override socket/session');
-        try{return await codexTool(op,params,env);}catch(e){if(e instanceof CodexError)throw new ForgeError(e.code,e.code,0,e.ambiguous);throw e;}
+        try{return await codexTool(op,params,env);}catch(e){if(e instanceof CodexError)throw new ForgeError(e.code,e.message,e.status,e.ambiguous,{hint:e.hint,data:e.data});throw e;}
       }
       if(socket)return requestSession(socket,{op,params});
       if(['issue_claim','issue_renew','issue_release','issue_close'].includes(op))usage('Execution requires a live session: forge session start, then --socket PATH');
       if(op==='issue_timeline'||op==='project')return extra(op,params);
-      if(!Object.hasOwn(toolSchemas,op))usage('Unknown worker operation');
       return (await worker()).execute(op as ToolName,params);
     }
-    const output=(result:unknown)=>process.stdout.write(JSON.stringify(result)+'\n');
+    const output=(result:unknown)=>process.stdout.write(humanMode && format!=='json' ? renderHuman(result,words) : JSON.stringify(result)+'\n');
     if(words[0]==='skill') {
       const source=fileURLToPath(new URL('../skills/collab-forge-client/',import.meta.url));
       if(words[1]==='path'){count(2);flags();output({path:source});return 0;}
@@ -182,14 +261,27 @@ export async function main(argv: string[]): Promise<number> {
       const operations:Record<string,string>={status:'state',guard:'guard',context:'context',retry:'retry',stop:'shutdown'};
       if(action==='wait') {
         const end=Date.now()+15_000;
-        do {try{output(await requestSession(socket,{op:'state'}));return 0;}catch{await delay(100);}}while(Date.now()<end);
+        do {
+          try { output(await requestSession(socket,{op:'state'})); return 0; }
+          catch (error) {
+            if (!(error instanceof ForgeError) || !['session_unavailable','session_timeout'].includes(error.code)) throw error;
+            await delay(100);
+          }
+        } while(Date.now()<end);
         throw new ForgeError('unavailable','Session did not become ready within 15 seconds');
       }
       if(!operations[action])usage('Unknown session action');
       const result=await requestSession(socket,{op:operations[action]});output(result);
       return action==='guard' && !result.allowed ? 4 : 0;
     }
-    if(words[0]==='health'){count(1);flags();output(socket ? await requestSession(socket,{op:'health'}) : await new ClientHTTP(validateURL(env.FORGE_URL??'http://127.0.0.1:7347'),'',sessionId).request('/health'));return 0;}
+    if(words[0]==='health'){
+      count(1);flags();
+      if(socket){output(await requestSession(socket,{op:'health'}));return 0;}
+      let url:string;
+      try { url=validateURL(env.FORGE_URL??'http://127.0.0.1:7347'); }
+      catch { throw new ForgeError('configuration','FORGE_URL must be an HTTP(S) loopback IP literal origin'); }
+      output(await new ClientHTTP(url,'',sessionId).request('/health'));return 0;
+    }
     if(words[0]==='project'){count(1);flags();output(await call('project'));return 0;}
     if(words[0]==='admin') {
       // Do not accept a worker credential as an implicit supervisor fallback.
@@ -248,6 +340,7 @@ export async function main(argv: string[]): Promise<number> {
       body=await fields(allowed[op]);
       if(!['issue_list','issue_create'].includes(op))ref(body);
     }
+    if(Object.hasOwn(toolSchemas,op)) validateParams(op as ToolName,body);
     if(op==='issue_timeline') {
       if('all' in body && typeof body.all!=='boolean')usage('all must be boolean');
       const all=body.all===true;const max=body.max_pages??100;delete body.all;delete body.max_pages;
@@ -266,7 +359,7 @@ export async function main(argv: string[]): Promise<number> {
     output(await call(op,body));return 0;
   } catch(error) {
     const e=error instanceof ForgeError?error:new ForgeError('client_error','Client operation failed; check configuration, input and session availability');
-    process.stderr.write(JSON.stringify({error:{code:e.code,message:e.message,ambiguous:e.ambiguous}})+'\n');
+    process.stderr.write(JSON.stringify(forgeErrorEnvelope(e))+'\n');
     return e.ambiguous?3:e.code==='usage'?2:1;
   } finally {await controller?.shutdown('cli_exit');}
 }

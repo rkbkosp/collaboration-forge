@@ -28,6 +28,17 @@ forge skill install --target "$HOME/.agents/skills/collab-forge-client"
 
 所有普通结果为 JSON stdout；错误为 sanitized JSON stderr。`--help` 为文本。
 
+需要给 Human 直接阅读时，使用相同的 worker/admin/read 参数加 `human` 前缀：
+
+```sh
+forge human issue list --status open
+forge human issue get REF
+forge human issue timeline REF
+forge human admin list --status open
+```
+
+Human 模式只改变成功结果的渲染，不改变参数校验、权限、session、网络或 mutation 语义；默认输出稳定的标题、字段和表格，并过滤 execution/attempt/token 字段。需要脚本处理时使用 `--format json` 或 `--json` 恢复 JSON stdout。错误仍为相同的 JSON stderr envelope：`{"error":{"code","message","ambiguous", "hint?", "data?"},"status?}`。
+
 | 命令 | 参数 |
 | --- | --- |
 | `health`、`project` | 健康与配置项目发现 |

@@ -107,7 +107,9 @@ lease. All worker operations, paginated timeline, explicit Human administration,
 JSON/file inputs, exit codes, safety boundaries and recovery are documented in
 [the client Skill reference](skills/collab-forge-client/references/cli.md).
 `forge admin ...` requires a separate supervisor credential; it never falls back
-to the worker token. See [client acceptance](docs/client-acceptance.md).
+to the worker token. Prefix the same read/admin commands with `forge human`
+for deterministic Human-readable output; use `--format json` or `--json` for
+machine output. See [client acceptance](docs/client-acceptance.md).
 
 ## Codex adapter
 

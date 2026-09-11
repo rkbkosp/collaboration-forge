@@ -15,7 +15,8 @@ test('real Codex facade checkout reuses one claim across repositories and retain
  try{
   async function repo(name:string){const d=join(dir,name);await mkdir(d);const git=(args:string[])=>{const p=spawnSync('git',args,{cwd:d,encoding:'utf8'});assert.equal(p.status,0,p.stderr);};git(['init','-q']);git(['config','user.email','fixture@example.invalid']);git(['config','user.name','Fixture']);await writeFile(join(d,'tracked.txt'),'base\n');git(['add','.']);git(['commit','-qm','base']);return d;}
   const a=await repo('first');const b=await repo('second');await writeFile(join(a,'tracked.txt'),'dirty\n');await writeFile(join(a,'new.txt'),'untracked\n');
-  const host=join(dir,'host-forge');await writeFile(host,`#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`,{mode:0o700});
+  const resolver=fileURLToPath(new URL('../scripts/forge-project-root.mjs',import.meta.url));
+  const host=join(dir,'host-forge');await writeFile(host,`#!/bin/sh\n${quote(process.execPath)} ${quote(resolver)} ${quote(a)} ${quote(b)} >/dev/null || exit 2\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`,{mode:0o700});
   const issue=(await f.admin(`/api/v1/projects/${f.projectID}/issues`,{title:'Multi-repository checkout fixture'})).issue;
   const env={...process.env,FORGE_URL:f.url,FORGE_WORKER_TOKEN_FILE:join(f.dataDir,'worker-token'),FORGE_CODEX_BINARY:process.execPath,FORGE_CODEX_BASE_CLI:host};
   const child=spawn(process.execPath,[script,'codex','--import','tsx',fixture,issue.uid,a,b],{env,stdio:['ignore','pipe','pipe']});let output='';let errors='';child.stdout.on('data',b=>output+=b);child.stderr.on('data',b=>errors+=b);

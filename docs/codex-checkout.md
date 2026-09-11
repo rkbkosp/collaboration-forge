@@ -140,3 +140,36 @@ from another project's store or another Issue cannot be recovered this way.
 
 The legacy `forged checkout ... -- AGENT` still owns an independent execution
 runtime. It is not the command above and must not be layered onto a Codex claim.
+
+## Host routing for manually created Git worktrees
+
+A host wrapper that selects a project by cwd prefix must also resolve ordinary
+`git worktree add` directories. The packaged `scripts/forge-project-root.mjs`
+accepts the host's registered repository roots and prints the matching canonical
+root, or exits 2 without output. It compares canonical Git common directories;
+linked worktrees, their subdirectories and symlink paths share the registration.
+An unrelated clone or nested repository does not inherit the enclosing project's
+binding. Inherited `GIT_*` overrides are ignored for this lookup.
+
+Integrate it **before** the host wrapper's project selection and existing
+environment/argument conflict checks, for example:
+
+```sh
+forge_workspace=$("$node" /installed/forge/scripts/forge-project-root.mjs \
+  /registered/project-a /registered/project-b) || fail
+# Select the endpoint and credential file paths from forge_workspace.
+# Keep the existing checks rejecting conflicting endpoint, token and socket flags.
+# exec the installed Forge CLI WITHOUT cd: checkout --source defaults to real cwd.
+```
+
+Keep the registration list in the host wrapper, not a worker-controlled environment
+variable. This helper reads Git metadata only, never credentials. It does not
+create or restore execution authority. A manually created worktree retains the
+current runtime only when its shell inherits that runtime's environment; a new
+runtime still needs its own launch and claim. The existing launcher shim handles
+Forge-managed snapshot repositories, which have their own Git common directories,
+and delegates ordinary paths to this host router. Shells that replace PATH can
+use `$FORGE_CODEX_CLI` explicitly.
+
+Installing the helper and updating a host wrapper does not activate a new daemon
+or the claimed-checkout feature. Those still use the installed runtime version.

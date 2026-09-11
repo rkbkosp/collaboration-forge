@@ -1,6 +1,6 @@
 import {spawnSync} from 'node:child_process';
-import {readFile} from 'node:fs/promises';
-import {join} from 'node:path';
+import {readFile,mkdir} from 'node:fs/promises';
+import {join,dirname} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {handleHook} from '../../codex/hooks.ts';
 process.env.CODEX_SESSION_ID=randomUUID();process.env.CODEX_THREAD_ID=process.env.CODEX_SESSION_ID;
@@ -9,6 +9,16 @@ function cli(args:string[],cwd=source){const p=spawnSync('forge',args,{cwd,env:p
 await handleHook({hook_event_name:'SessionStart',session_id:process.env.CODEX_SESSION_ID,source:'startup'});
 if(!source){throw new Error('missing fixture source');}
 cli(['issue','claim',issue]);
+const manual=join(dirname(source),'agent-created');
+const added=spawnSync('git',['worktree','add','--detach',manual,'HEAD'],{cwd:source,encoding:'utf8'});
+if(added.status!==0)throw new Error('manual worktree setup failed');
+await mkdir(join(manual,'sub'));
+for(const cwd of [manual,join(manual,'sub')]){
+ const current=cli(['codex','status'],cwd);
+ if(!current.active)throw new Error('manual worktree lost current runtime');
+ cli(['issue','get',issue],cwd);
+}
+
 const a=cli(['checkout',issue,'--dirty','--source',source]);
 const b=cli(['checkout',issue,'--ref','HEAD','--source',second],a.worktree);
 const state=cli(['codex','status'],a.worktree);if(!state.active||state.workspaces.length!==2)throw new Error('workspace authority missing');

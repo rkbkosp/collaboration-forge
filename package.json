@@ -12,6 +12,7 @@
     "pi-extension/schemas.ts",
     "client/",
     "scripts/forge.mjs",
+    "scripts/forge-project-root.mjs",
     "skills/collab-forge-client/",
     "pi-extension/direct-fetch.ts",
     "codex/",

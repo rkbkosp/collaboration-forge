@@ -10,6 +10,7 @@ Requires Go 1.27, macOS or Linux, and the patched Kata checkout at `./kata`
 (a separate ignored repository). Use a local filesystem supporting `flock`.
 
 ```sh
+./scripts/bootstrap-kata.sh  # applies the pinned, independently committed patches
 go build -o bin/forged ./cmd/forged
 ./bin/forged serve --data-dir .forge --project forge --listen 127.0.0.1:7347
 ```
@@ -19,7 +20,8 @@ numeric port, including `[::1]:7347`; wildcard addresses and hostnames are
 rejected. This bootstrap is not a remotely accessible deployment.
 
 On first startup, the CLI generates a cryptographically random supervisor
-credential at `.forge/admin-token` (0600). It never prints the token. Alternatively,
+credential at `.forge/admin-token` and a distinct worker credential at
+`.forge/worker-token` (both 0600). It never prints the token. Alternatively,
 pass `--admin-token-file /private/path/token`; an explicit file must already
 exist, be a regular 0600 file, and contain at least 32 printable ASCII characters
 without whitespace (one final newline is allowed). Protect this credential:
@@ -31,8 +33,12 @@ it never falls back to unauthenticated mode or generates credentials itself.
 ## HTTP
 
 - `GET /health` is public and returns only `{"status":"ok"}`.
-- Every other request requires `Authorization: Bearer <admin-token>`.
-- Authenticated `/api/v1/...` requests use Kata's existing HTTP contract.
+- Every other request requires an authenticated Bearer credential.
+- `GET /forge/v1/project` discovers the configured project and close protocol.
+- Workers can use only `POST /forge/v1/tools/{operation}`; raw Kata routes are
+  denied even if a worker supplies actor/role/protocol headers. See
+  [worker API](docs/worker-api.md). Never give a worker the admin credential.
+- Supervisor-authenticated `/api/v1/...` requests use Kata's existing HTTP contract.
   Forge assigns subject `human:supervisor` and actor `Human`, ignoring client
   actor fields for identity.
 - Native project/token/federation/integration administration is disabled by
@@ -55,6 +61,8 @@ unset TOKEN
 
 The data directory is 0700; Forge-owned files are 0600. `config.json` persists
 one stable project ULID and name, while `kata.db` is exclusively Kata-owned.
+`execution-key` signs execution credentials and must be included in backups;
+losing it invalidates existing proofs, not the underlying timed leases.
 Keep the entire directory together when backing up **after stopping forged**.
 Changing `--project` for an existing directory is refused rather than silently
 creating or renaming a project. Missing configuration beside an existing database

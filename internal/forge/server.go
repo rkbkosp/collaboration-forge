@@ -153,6 +153,7 @@ func New(cfg Config) (_ *Server, err error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{service: svc, project: result.Project, config: cfg, signer: signer, lock: lock, cancel: cancel, runDone: make(chan struct{})}
+	s.tools = newToolHandler(svc.Handler(), result.Project, signer)
 	s.handler = s.authenticatedHandler()
 	go func() {
 		s.runErr = svc.Run(ctx)

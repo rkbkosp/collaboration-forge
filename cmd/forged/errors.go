@@ -136,7 +136,7 @@ func sanitizeForgedData(value map[string]any) map[string]any {
 	for key, child := range value {
 		lower := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
 		compact := strings.ReplaceAll(lower, "_", "")
-		if strings.Contains(compact, "token") || strings.Contains(compact, "attempt") || strings.Contains(compact, "claimuid") || strings.Contains(compact, "credential") || strings.Contains(compact, "secret") {
+		if strings.Contains(compact, "token") || strings.Contains(compact, "attempt") || strings.Contains(compact, "executionid") || strings.Contains(compact, "claimuid") || strings.Contains(compact, "credential") || strings.Contains(compact, "secret") {
 			continue
 		}
 		switch nested := child.(type) {

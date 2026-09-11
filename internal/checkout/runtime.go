@@ -112,7 +112,8 @@ func errorData(value map[string]any) map[string]any {
 	clean := make(map[string]any, len(value))
 	for key, child := range value {
 		lower := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
-		if strings.Contains(lower, "token") || strings.Contains(lower, "attempt") || strings.Contains(lower, "execution_id") || strings.Contains(lower, "claim_uid") || strings.Contains(lower, "credential") || strings.Contains(lower, "secret") {
+		compact := strings.ReplaceAll(lower, "_", "")
+		if strings.Contains(compact, "token") || strings.Contains(compact, "attempt") || strings.Contains(compact, "executionid") || strings.Contains(compact, "claimuid") || strings.Contains(compact, "credential") || strings.Contains(compact, "secret") {
 			continue
 		}
 		switch nested := child.(type) {

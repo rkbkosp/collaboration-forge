@@ -1,4 +1,5 @@
 import { codexRPC, CodexError } from './transport.ts';
+import { stopDecision } from './stop.ts';
 import { codexIdentity } from './facade.ts';
 export const PROTOCOL='Forge is this workspace\'s work ledger. Before substantial work, inspect and claim the relevant issue with forge issue. Record discoveries as comments/issues/links. Close with truthful typed evidence, or release when handing off. Use forge --help. Runtime authority and renewal are managed by forged; never start a legacy session broker inside Codex.';
 export async function handleHook(input:any,env:NodeJS.ProcessEnv=process.env,rpc:typeof codexRPC=codexRPC):Promise<any>{
@@ -12,5 +13,12 @@ export async function handleHook(input:any,env:NodeJS.ProcessEnv=process.env,rpc
  if(!Object.hasOwn(events,name))throw new CodexError('unsupported_hook');
  const state=await rpc('event',{identity,event:events[name]},env,name==='SessionEnd'||name==='Interrupt'?650:2500);
  if(name==='SessionStart'||name==='SubagentStart'||name==='PostCompact')return {hookSpecificOutput:{hookEventName:name,additionalContext:PROTOCOL+'\n'+JSON.stringify(state)}};
+ if(name==='Stop'||name==='SubagentStop'){
+  const policy=env.FORGE_CODEX_STOP_POLICY??'strict';
+  if(policy!=='strict'&&policy!=='advisory')throw new CodexError('invalid_stop_policy');
+  const result=stopDecision(state,input,policy);
+  if(result.systemMessage)await rpc('event',{identity,event:'pause'},env,650);
+  return result;
+ }
  return {};
 }

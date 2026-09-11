@@ -1,6 +1,8 @@
 package forge
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -61,6 +63,13 @@ func (m *codexRuntime) event(w http.ResponseWriter, r *http.Request, digest [32]
 		codexFail(w, 409, "runtime_stopped")
 		return
 	}
+	m.mu.Lock()
+	stopped := instance.retired || m.ended[codexSessionKey{in.Identity.Instance, in.Identity.Session}]
+	m.mu.Unlock()
+	if stopped {
+		codexFail(w, 409, "runtime_stopped")
+		return
+	}
 	t.lastSeen = time.Now()
 	if in.Event == "interrupt" || in.Event == "pause" {
 		t.paused = true
@@ -68,5 +77,47 @@ func (m *codexRuntime) event(w http.ResponseWriter, r *http.Request, digest [32]
 	if in.Event == "prompt" {
 		t.paused = false
 	}
+	if in.Event == "stop_check" || in.Event == "context" {
+		m.refreshCodex(t)
+	}
 	m.execute(w, t, "status", nil)
+}
+
+// Stop/context observations never perform acquire/renew and never erase a
+// pending close receipt. Failure is unknown, not unclaimed.
+func (m *codexRuntime) refreshCodex(t *codexThread) {
+	if t.active == nil || t.pending != nil && t.pending.op == "issue_close" {
+		return
+	}
+	started := time.Now()
+	res := m.dispatch(t, "issue_get", marshalCodex(map[string]string{"ref": t.active.ref}), "", "")
+	var body map[string]any
+	if res.Code != 200 || json.Unmarshal(res.Body.Bytes(), &body) != nil {
+		t.unknown = true
+		return
+	}
+	issue, ok := body["issue"].(map[string]any)
+	if !ok || issue["uid"] != t.active.ref {
+		t.unknown = true
+		return
+	}
+	t.unknown = false
+	lease, _ := body["lease"].(map[string]any)
+	if lease["claim_uid"] != t.active.claim || lease["issue_uid"] != t.active.ref || issue["status"] != "open" {
+		t.active = nil
+		return
+	}
+	expires, e1 := time.Parse(time.RFC3339Nano, fmt.Sprint(lease["expires_at"]))
+	now, e2 := time.Parse(time.RFC3339Nano, fmt.Sprint(body["lease_hub_now"]))
+	if e1 != nil || e2 != nil {
+		t.unknown = true
+		return
+	}
+	deadline := started.Add(expires.Sub(now) - time.Second)
+	if deadline.Before(t.active.deadline) {
+		t.active.deadline = deadline
+	}
+	if !time.Now().Before(t.active.deadline) {
+		t.active = nil
+	}
 }

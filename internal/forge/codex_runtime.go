@@ -38,6 +38,7 @@ type codexThread struct {
 	retired       bool
 	release       bool
 	paused        bool
+	unknown       bool
 	lastSeen      time.Time
 	nextRenew     time.Time
 	active        *codexTenure
@@ -56,6 +57,7 @@ type codexPending struct {
 	params    json.RawMessage
 	signature string
 	key       string
+	token     string
 }
 type codexCommand struct {
 	RequestID string          `json:"request_id"`
@@ -255,7 +257,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 		if t.active != nil && !time.Now().Before(t.active.deadline) {
 			t.active = nil
 		}
-		codexReply(w, map[string]any{"active": t.active != nil, "pending": t.pending != nil, "issue": func() string {
+		codexReply(w, map[string]any{"active": t.active != nil, "pending": t.pending != nil, "paused": t.paused, "unknown": t.unknown, "issue": func() string {
 			if t.active != nil {
 				return t.active.ref
 			}
@@ -295,9 +297,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 		_ = json.Unmarshal(params, &original)
 		ref, _ = original["ref"].(string)
 		key = t.pending.key
-		if t.active != nil {
-			token = t.active.token
-		}
+		token = t.pending.token
 	} else if execution {
 		if t.pending != nil {
 			if t.pending.op != op || t.pending.signature != signature {
@@ -306,9 +306,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 			}
 			params = t.pending.params
 			key = t.pending.key
-			if t.active != nil {
-				token = t.active.token
-			}
+			token = t.pending.token
 		} else {
 			if t.active != nil && !time.Now().Before(t.active.deadline) {
 				t.active = nil
@@ -335,7 +333,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 				}
 			}
 			params = marshalCodex(p)
-			t.pending = &codexPending{op: op, params: params, signature: signature, key: key}
+			t.pending = &codexPending{op: op, params: params, signature: signature, key: key, token: token}
 		}
 	} else {
 		switch op {
@@ -400,6 +398,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 		if t.active != nil {
 			alias = t.active.alias
 		}
+		t.unknown = false
 		t.active = &codexTenure{ref: uid, alias: alias, claim: claim, token: token, deadline: deadline}
 		t.nextRenew = time.Now().Add(30 * time.Second)
 	}

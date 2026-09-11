@@ -205,3 +205,36 @@ func TestCodexAmbiguousAcquireReusesAttemptAndContributionDoesNotClearPending(t 
 		t.Fatal("new acquire identity on network retry")
 	}
 }
+func TestCodexPendingCloseAfterExpiryStillReplaysKataReceipt(t *testing.T) {
+	f := newToolsFixture(t)
+	uid, _ := toolsCreate(t, f.handler, "Close response loss")
+	closeCalls := 0
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "issue_close") {
+			closeCalls++
+			if closeCalls == 1 {
+				out := httptest.NewRecorder()
+				f.handler.ServeHTTP(out, r)
+				toolsSuccess(t, out)
+				w.WriteHeader(502)
+				w.Write([]byte(`{}`))
+				return
+			}
+		}
+		f.handler.ServeHTTP(w, r)
+	})
+	m := newCodexRuntime(h)
+	codexRequest(m, "register", map[string]any{"instance_id": "close-retry", "pid": os.Getpid()}, codexTestToken)
+	i := codexIdentity{"close-retry", "s", "t"}
+	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_claim", Params: marshalCodex(map[string]string{"ref": uid})}, codexTestToken))
+	p := map[string]any{"ref": uid, "reason": "audit-no-change", "message": "Verified generated fixture; close response loss requires receipt recovery without repeating the mutation.", "evidence": []any{map[string]string{"type": "no-change-audit", "rationale": "Generated fixture only; no product change required."}}}
+	if w := codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_close", Params: marshalCodex(p)}, codexTestToken); w.Code != 502 {
+		t.Fatal(w.Code)
+	}
+	m.threads[i].active.deadline = time.Now().Add(-time.Second)
+	toolsSuccess(t, codexRequest(m, "event", codexEvent{Identity: i, Event: "stop_check"}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "retry"}, codexTestToken))
+	if closeCalls != 2 {
+		t.Fatal("receipt retry missing")
+	}
+}

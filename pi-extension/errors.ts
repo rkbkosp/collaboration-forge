@@ -88,6 +88,6 @@ export function forgeErrorEnvelope(error: ForgeErrorLike, sanitize?: (value: unk
     body.data = clean(error.data);
   }
   const envelope: Record<string, unknown> = { error: body };
-  if (Number.isInteger(error.status) && (error.status ?? 0) > 0) envelope.status = error.status;
+  if (Number.isInteger(error.status) && (error.status ?? 0) >= 100 && (error.status ?? 0) <= 599) envelope.status = error.status;
   return envelope;
 }

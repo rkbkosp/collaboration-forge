@@ -47,7 +47,7 @@ function checkRequest(value: unknown): asserts value is Request {
     throw failure("invalid_request", "Require one request object with op and optional tool params; control operations take no params");
   }
 }
-function responseLine(result: unknown, error: unknown, controller: Controller): string {
+function responseLine(result: unknown, error: unknown, controller: Controller, fallbackAmbiguous = false): string {
   let line: string;
   try {
     const envelope = error instanceof ForgeError
@@ -56,7 +56,7 @@ function responseLine(result: unknown, error: unknown, controller: Controller): 
     line = JSON.stringify(error ? { ok: false, ...envelope } : { ok: true, result: controller.sanitize(result ?? null) }) + "\n";
   } catch { line = JSON.stringify({ ok: false, error: { code: "session_error", message: "Session operation unavailable", ambiguous: false } }) + "\n"; }
   if (Buffer.byteLength(line) > MAX_RESPONSE) {
-    return JSON.stringify({ ok: false, error: { code: "response_too_large", message: "Session response exceeds size limit; check state before retrying", ambiguous: true } }) + "\n";
+    return JSON.stringify({ ok: false, error: { code: "response_too_large", message: "Session response exceeds size limit; check state before retrying", ambiguous: error instanceof ForgeError ? error.ambiguous || fallbackAmbiguous : fallbackAmbiguous } }) + "\n";
   }
   return line;
 }
@@ -128,7 +128,7 @@ export async function startSession(socketPath: string, controller: Controller, e
     let size = 0;
     let timer: ReturnType<typeof setTimeout>;
     const deadline = (ms: number, fn: () => void) => { clearTimeout(timer); timer = setTimeout(fn, ms); };
-    const reply = (result: unknown, error?: ForgeError, shutdown = false) => {
+    const reply = (result: unknown, error?: ForgeError, shutdown = false, fallbackAmbiguous = false) => {
       if (replied) return;
       replied = true; received = true;
       chunks = [];
@@ -141,7 +141,7 @@ export async function startSession(socketPath: string, controller: Controller, e
       };
       if (socket.destroyed) { finished(); return; }
       deadline(IO_TIMEOUT, finished);
-      socket.end(responseLine(result, error, controller), finished);
+      socket.end(responseLine(result, error, controller, fallbackAmbiguous), finished);
     };
     deadline(IO_TIMEOUT, () => reply(undefined, failure("session_timeout", "Session request read timed out")));
     socket.on("error", () => { socket.destroy(); });
@@ -183,8 +183,9 @@ export async function startSession(socketPath: string, controller: Controller, e
           default: throw failure("unknown_operation", "Unknown session operation");
         }
       };
-      void dispatch().then((result) => reply(result, undefined, request.op === "shutdown"),
-        (error) => reply(undefined, error instanceof ForgeError ? error : failure("session_error", "Session operation unavailable")));
+      const uncertain = mutationOps.has(request.op);
+      void dispatch().then((result) => reply(result, undefined, request.op === "shutdown", uncertain),
+        (error) => reply(undefined, error instanceof ForgeError ? error : failure("session_error", "Session operation unavailable"), false, uncertain));
     });
   });
   // Native transport errors are never printed (they may include local paths).

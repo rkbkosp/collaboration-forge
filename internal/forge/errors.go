@@ -138,7 +138,7 @@ func sanitizeForgeErrorValue(value any) any {
 		for key, child := range value {
 			lower := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
 			compact := strings.ReplaceAll(lower, "_", "")
-			if lower == "authorization" || lower == "bearer" || strings.Contains(compact, "token") || lower == "x_forge_execution" || strings.Contains(compact, "attempt") || strings.Contains(compact, "executionid") || strings.Contains(compact, "claimuid") {
+			if lower == "authorization" || lower == "bearer" || strings.Contains(compact, "token") || strings.Contains(compact, "forgeexecution") || strings.Contains(compact, "attempt") || strings.Contains(compact, "executionid") || strings.Contains(compact, "claimuid") {
 				continue
 			}
 			clean[key] = sanitizeForgeErrorValue(child)

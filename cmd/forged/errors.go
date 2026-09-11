@@ -44,7 +44,9 @@ func forgedErrorFrom(err error) *forgedError {
 	}
 	// Do not print native causes: they may contain local paths or request data.
 	message := "forged operation failed; inspect command configuration and server state"
-	if strings.HasPrefix(err.Error(), "usage:") || strings.Contains(err.Error(), " usage:") {
+	nativeMessage := err.Error()
+	if strings.HasPrefix(nativeMessage, "usage:") || strings.Contains(nativeMessage, " usage:") ||
+		strings.Contains(nativeMessage, "invalid value for") || strings.Contains(nativeMessage, "flag provided but not defined") || strings.Contains(nativeMessage, "flag needs an argument") {
 		return newForgedError("usage", message)
 	}
 	return newForgedError("forged_error", message)
@@ -118,7 +120,7 @@ func sanitizeForgedText(value, fallback string) string {
 	if value == "" || len(value) > 512 {
 		return fallback
 	}
-	for _, marker := range []string{"Bearer ", "worker-token", "admin-token", "execution_token", "attempt_id", "claim_uid"} {
+	for _, marker := range []string{"Bearer ", "worker-token", "admin-token", "execution_token", "attempt_id", "claim_uid", "token", "credential", "secret"} {
 		if strings.Contains(strings.ToLower(value), strings.ToLower(marker)) {
 			return fallback
 		}
@@ -133,7 +135,8 @@ func sanitizeForgedData(value map[string]any) map[string]any {
 	out := make(map[string]any, len(value))
 	for key, child := range value {
 		lower := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
-		if strings.Contains(lower, "token") || strings.Contains(lower, "attempt") || strings.Contains(lower, "claim_uid") || strings.Contains(lower, "credential") || strings.Contains(lower, "secret") {
+		compact := strings.ReplaceAll(lower, "_", "")
+		if strings.Contains(compact, "token") || strings.Contains(compact, "attempt") || strings.Contains(compact, "claimuid") || strings.Contains(compact, "credential") || strings.Contains(compact, "secret") {
 			continue
 		}
 		switch nested := child.(type) {

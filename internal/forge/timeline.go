@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go.kenn.io/kata"
 	"net/http"
+	"time"
 )
 
 type issueTimelineInput struct {
@@ -24,7 +25,10 @@ func (h *toolHandler) timeline(ctx context.Context, principal kata.Principal, in
 		return shown
 	}
 	var show struct {
-		Issue json.RawMessage `json:"issue"`
+		Issue         json.RawMessage   `json:"issue"`
+		Lease         json.RawMessage   `json:"lease"`
+		LeaseHubNow   *time.Time        `json:"lease_hub_now"`
+		PendingLeases []json.RawMessage `json:"pending_leases"`
 	}
 	var issue struct {
 		UID string `json:"uid"`
@@ -32,6 +36,9 @@ func (h *toolHandler) timeline(ctx context.Context, principal kata.Principal, in
 	if json.Unmarshal(shown.body, &show) != nil || json.Unmarshal(show.Issue, &issue) != nil || !toolCanonicalUID(issue.UID) {
 		return toolError(502, "invalid_response", "invalid issue projection")
 	}
+	// Read completion time, not a transaction-wide snapshot timestamp. Kata
+	// omits lease_hub_now when no live lease exists on this local project.
+	observedAt := time.Now().UTC()
 	events := h.dispatch(ctx, principal, "pollProjectEvents", http.MethodGet, fmt.Sprintf("/api/v1/projects/%d/events?after_id=%d&limit=%d", h.project.ID, in.AfterID, limit), nil, nil)
 	if !events.success() {
 		return events
@@ -40,6 +47,10 @@ func (h *toolHandler) timeline(ctx context.Context, principal kata.Principal, in
 	if err != nil {
 		return toolError(502, "invalid_response", "invalid event projection")
 	}
+	page.Lease = show.Lease
+	page.LeaseHubNow = show.LeaseHubNow
+	page.PendingLeases = show.PendingLeases
+	page.ObservedAt = observedAt
 	body, err := json.Marshal(page)
 	if err != nil || len(body) > toolResponseLimit {
 		return toolError(502, "response_too_large", "timeline response exceeds limit")
@@ -51,6 +62,10 @@ func (h *toolHandler) timeline(ctx context.Context, principal kata.Principal, in
 // The scan cursor advances over ALL project events, including filtered rows.
 // Consumers must use ScannedEventCount, not len(Events), to detect exhaustion.
 type timelinePage struct {
+	Lease             json.RawMessage   `json:"lease"`
+	LeaseHubNow       *time.Time        `json:"lease_hub_now,omitempty"`
+	PendingLeases     []json.RawMessage `json:"pending_leases,omitempty"`
+	ObservedAt        time.Time         `json:"observed_at"`
 	Issue             json.RawMessage   `json:"issue"`
 	Events            []json.RawMessage `json:"events"`
 	NextAfterID       int64             `json:"next_after_id"`

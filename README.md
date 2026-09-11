@@ -86,6 +86,12 @@ are untrusted; server role separation cannot compensate for a stolen admin token
 # Optional: --url http://127.0.0.1:7347 --token-file /private/admin-token
 ```
 
+The terminal view first shows current execution authority, its server confirmation
+time and lease expiry. Use `--details` for the exact holder and ClaimUID, and
+rerun to refresh. This is a timestamped observation, not proof the Agent is active
+or permission to start work. Failed reads show unknown rather than unclaimed.
+The heading and paginated history are read separately.
+
 The terminal view reads Kata events: actor, comment, execution acquire,
 links/dependencies, close reason and typed evidence, release/expiry. It does not
 create a second audit store. Pagination scans project events while filtering the

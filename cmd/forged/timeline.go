@@ -21,6 +21,7 @@ func runTimeline(ctx context.Context, args []string, out io.Writer) error {
 	flags.SetOutput(out)
 	base := flags.String("url", "http://127.0.0.1:7347", "loopback Forge URL")
 	file := flags.String("token-file", ".forge/admin-token", "0600 supervisor or worker token file")
+	details := flags.Bool("details", false, "show exact lease holder and ClaimUID")
 	after := flags.Int64("after-id", 0, "resume project event cursor")
 	limit := flags.Int("limit", 100, "project events per page (1–1000)")
 	maxPages := flags.Int("max-pages", 100, "maximum pages; truncation returns an error and resume cursor")
@@ -55,6 +56,11 @@ func runTimeline(ctx context.Context, args []string, out io.Writer) error {
 	transport := &http.Transport{Proxy: nil, ResponseHeaderTimeout: 5 * time.Second}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Timeout: 10 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	lastConfirmed := "none"
+	readFailure := func(err error) error {
+		fmt.Fprintf(out, "\nExecution authority: Unknown (refresh failed). Last confirmed: %s\n", lastConfirmed)
+		return err
+	}
 	cursor := *after
 	for pageIndex := 0; pageIndex < *maxPages; pageIndex++ {
 		body, _ := json.Marshal(map[string]any{"ref": flags.Arg(0), "after_id": cursor, "limit": *limit})
@@ -67,22 +73,26 @@ func runTimeline(ctx context.Context, args []string, out io.Writer) error {
 		req.Header.Set("Content-Type", "application/json")
 		response, err := client.Do(req)
 		if err != nil {
-			return fmt.Errorf("timeline request: %w", err)
+			return readFailure(fmt.Errorf("timeline request: %w", err))
 		}
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, (8<<20)+1))
 		closeErr := response.Body.Close()
 		if err := errors.Join(readErr, closeErr); err != nil {
-			return err
+			return readFailure(err)
 		}
 		if len(raw) > 8<<20 {
-			return errors.New("timeline response exceeds 8 MiB")
+			return readFailure(errors.New("timeline response exceeds 8 MiB"))
 		}
 		if response.StatusCode != http.StatusOK {
-			return fmt.Errorf("timeline request failed: HTTP %d", response.StatusCode)
+			return readFailure(fmt.Errorf("timeline request failed: HTTP %d", response.StatusCode))
 		}
 		var page struct {
-			Issue  struct{ UID, Title, Status string } `json:"issue"`
-			Events []struct {
+			Lease         json.RawMessage                     `json:"lease"`
+			LeaseHubNow   time.Time                           `json:"lease_hub_now"`
+			ObservedAt    time.Time                           `json:"observed_at"`
+			PendingLeases []json.RawMessage                   `json:"pending_leases"`
+			Issue         struct{ UID, Title, Status string } `json:"issue"`
+			Events        []struct {
 				ID          int64 `json:"event_id"`
 				Type, Actor string
 				CreatedAt   string          `json:"created_at"`
@@ -94,10 +104,12 @@ func runTimeline(ctx context.Context, args []string, out io.Writer) error {
 			ResetAfterID int64 `json:"reset_after_id"`
 		}
 		if err := json.Unmarshal(raw, &page); err != nil {
-			return fmt.Errorf("invalid timeline: %w", err)
+			return readFailure(fmt.Errorf("invalid timeline: %w", err))
 		}
 		if pageIndex == 0 {
 			fmt.Fprintf(out, "Issue %s — %q [%s]\n", page.Issue.UID, page.Issue.Title, page.Issue.Status)
+			lastConfirmed = printTimelineAuthority(out, page.Issue.Status, page.Lease, page.LeaseHubNow, page.ObservedAt, len(page.PendingLeases) > 0, *details)
+			fmt.Fprintln(out, "\nHistory (read separately; may include changes after the status observation):")
 		}
 		if page.Reset {
 			if page.ResetAfterID <= cursor {
@@ -125,4 +137,73 @@ func runTimeline(ctx context.Context, args []string, out io.Writer) error {
 		cursor = page.NextAfterID
 	}
 	return fmt.Errorf("timeline truncated at page limit; resume with --after-id %d", cursor)
+}
+
+// The heading is a timestamped observation, never an execution preflight.
+// A local clock or an old acquired event cannot establish current authority.
+func printTimelineAuthority(out io.Writer, status string, raw json.RawMessage, hubNow, observed time.Time, pending, details bool) string {
+	unknown := func() string {
+		fmt.Fprintln(out, "Execution authority: Unknown (refresh required)")
+		if !observed.IsZero() {
+			fmt.Fprintf(out, "Read completed: %s (server time)\n", observed.Format(time.RFC3339Nano))
+		}
+		return "none"
+	}
+	if observed.IsZero() || len(raw) == 0 || pending {
+		return unknown()
+	}
+	var lease *struct {
+		Holder     string     `json:"holder"`
+		Purpose    string     `json:"purpose"`
+		ClaimUID   string     `json:"claim_uid"`
+		ClaimKind  string     `json:"claim_kind"`
+		AcquiredAt time.Time  `json:"acquired_at"`
+		ExpiresAt  *time.Time `json:"expires_at"`
+		ReleasedAt *time.Time `json:"released_at"`
+	}
+	if json.Unmarshal(raw, &lease) != nil {
+		return unknown()
+	}
+	confirmed := observed
+	if lease == nil {
+		switch status {
+		case "open":
+			fmt.Fprintln(out, "Execution authority: Unclaimed; acquisition is arbitrated by the server")
+		case "closed":
+			fmt.Fprintln(out, "Execution authority: Closed")
+		default:
+			return unknown()
+		}
+	} else {
+		if status != "open" || hubNow.IsZero() || lease.Holder == "" || lease.ClaimUID == "" || lease.ReleasedAt != nil {
+			return unknown()
+		}
+		if lease.ClaimKind == "timed" {
+			if lease.ExpiresAt == nil || !lease.ExpiresAt.After(hubNow) {
+				return unknown()
+			}
+		} else if lease.ClaimKind != "hard" {
+			return unknown()
+		}
+		confirmed = hubNow
+		label := lease.Holder
+		// Forge prefixes purpose with the session display actor at acquire time.
+		// It is a label only; exact holder/ClaimUID remain the authority identities.
+		if actor, _, ok := strings.Cut(lease.Purpose, " [Pi session "); ok && strings.HasPrefix(actor, "Agent/") {
+			label = actor
+		}
+		fmt.Fprintf(out, "Execution authority: Held by %q (authorization, not proof of activity)\n", label)
+		fmt.Fprintf(out, "Acquired: %s\n", lease.AcquiredAt.Format(time.RFC3339Nano))
+		if lease.ExpiresAt != nil {
+			fmt.Fprintf(out, "Lease expires: %s\n", lease.ExpiresAt.Format(time.RFC3339Nano))
+		} else {
+			fmt.Fprintln(out, "Lease: hard (no timed expiry)")
+		}
+		if details {
+			fmt.Fprintf(out, "Holder: %q\nClaimUID: %q\n", lease.Holder, lease.ClaimUID)
+		}
+	}
+	stamp := confirmed.Format(time.RFC3339Nano)
+	fmt.Fprintf(out, "Last confirmed: %s (server time; rerun to refresh)\n", stamp)
+	return stamp
 }

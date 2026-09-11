@@ -69,3 +69,38 @@ across daemon restarts so a still-running client can recover its pending receipt
 Credentials are a cooperative local trust boundary, not an OS sandbox. Anyone
 who can read the supervisor token or host data directory can supervise the
 service. External filesystem writers do not participate in issue lease fencing.
+
+## Timeline current state and history
+
+`issue_timeline` returns the existing `issue`, `events`, scan cursor and reset
+fields, plus:
+
+- `lease`: Kata's current lease projection, explicitly `null` when absent.
+- `lease_hub_now`: Kata's authority clock when supplied by `showIssue`.
+- `pending_leases`: unresolved pending requests when present; do not treat them
+  as confirmed execution authority.
+- `observed_at`: Forge's UTC time immediately after the issue read completes,
+  before reading events. It is present even when no lease exists.
+
+These fields are observations of the configured local project, not a shared
+transaction snapshot of the issue, lease and all history pages. Every request
+reads current state again. Preserve the observation time when displaying cached
+results. An unavailable read means unknown, not unclaimed; old servers omitting
+these fields cannot establish current authority through timeline alone.
+
+A timed lease is held only at its authority clock while unexpired. Do not derive
+current expiry from `claim.acquired` events: renew updates the lease without
+emitting heartbeat events. Displaying a holder proves authorization, not that
+its process is actively working. Expiry or a displayed unclaimed state never
+substitutes for server-side atomic acquire.
+
+The CLI prints a first-page state heading, server confirmation time and lease
+expiry, followed by history. Rerun to refresh; `--details` adds exact holder and
+ClaimUID to the heading. It shows unknown on failed reads and retains the last
+displayed confirmation time if a later page fails. It does not use the local
+wall clock to infer a new holder or availability. Historical close evidence
+remains in the event stream.
+
+Automatic execution-evidence collection remains a future goal. This change
+only projects existing Kata state and events; it adds no evidence ingestion,
+heartbeat events or execution database.

@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"go.local/collab-forge/internal/forge"
+	"github.com/rkbkosp/collaboration-forge/internal/forge"
 	"golang.org/x/sys/unix"
 )
 

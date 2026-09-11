@@ -27,6 +27,7 @@ export KATA_TEST_PLAIN_POSTGRES_DSN="postgres://kata:forge-test-only@$plainAddre
 # macOS AF_UNIX paths have a short length limit. Long inherited TMPDIR paths
 # cause unrelated upstream client/TUI tests to fail before reaching their logic.
 export TMPDIR=/tmp
+"$root/scripts/bootstrap-kata.sh"
 (cd "$root/kata/web" && bun install --frozen-lockfile)
 cd "$root/kata"
 go test -v ./... -p 4 -timeout 15m

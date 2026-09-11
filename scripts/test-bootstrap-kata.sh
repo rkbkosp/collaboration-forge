@@ -3,7 +3,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-# Exercise real clone + patch application, without depending on network access.
+# Exercise real clone + patch application from the fixed submodule, without
+# depending on network access.
 KATA_UPSTREAM_URL="$root/kata" bash "$root/scripts/bootstrap-kata.sh" "$tmp/kata"
 bash "$root/scripts/bootstrap-kata.sh" "$tmp/kata"
 printf '\nlocal change\n' >> "$tmp/kata/README.md"

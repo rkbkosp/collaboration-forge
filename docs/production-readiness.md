@@ -8,8 +8,8 @@ Issue、Comment、Link、Event、Lease 和 close receipt 均属于 Kata。没有
 
 ## 可复现基线
 
-- 上游：`kenn-io/kata@b1667be5603a308f8c2d44a0d6cbac2463a7eeb2`。
-- Kata 最终提交：`b67a69678c69b00594dde45c2ffd4c2539a35b6b`。
+- 补丁来源上游：`kenn-io/kata@b1667be5603a308f8c2d44a0d6cbac2463a7eeb2`。
+- 工作区 submodule：`rkbkosp/kata@b67a69678c69b00594dde45c2ffd4c2539a35b6b`，保持干净且承载已验证补丁树。
 - 补丁后 tree：`7f4c5cc52f32e29dee68cb702330910d99ef7c1c`；由 `patches/kata/` 的九个独立补丁重建。
 - 验收环境：Darwin arm64、Go 1.27.1、Node 24.19.0、npm 11.17.0、Bun 1.4.0、Pi SDK 0.85.1、Docker 29.4.0。
 - Forge 提交层次：F1 `dc9fc24`；F2 `04b617d`；F3 `91148a9`；F4 `6cce372`；F5 `f87af89`；F6 `0470580`；F7 `0452183`。

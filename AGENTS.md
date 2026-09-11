@@ -11,5 +11,6 @@
   same logical acquire must reuse their original attempt identity.
 - Do not log credentials or secrets. The service is loopback-only by default;
   do not silently expose unauthenticated listeners.
-- kata/ is a separate patched upstream checkout. Patch export/bootstrap makes
-  its exact source reproducible; do not add the nested worktree to this repo.
+- kata/ is a fixed-commit patched upstream fork submodule. The versioned patch
+  export remains available for reconstruction; never make the submodule dirty
+  or add another nested worktree to this repo.

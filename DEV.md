@@ -14,7 +14,9 @@ K2 验证：daemon/Service/SQLite 全量、真实 PostgreSQL conformance + Claim
 
 K3 `31c2867`、K4 `f837be0`、K5 `f5a312d`、K6 `981d394`、K7 `304d2c4`、K8 `34fadad` 已独立提交。
 后续正确性提交 `b67a696`：strict close 已通过完整 execution principal guard 时，不再拿展示 actor 与 opaque holder 比较而误记 federation violation；legacy audit 不变。SQLite 全量和真实 PostgreSQL claim/guard conformance 已通过（无 skip），HTTP daemon/Service 和生成 client/build 阶段检查通过。尚不据此声称 Forge/Pi 或 PostgreSQL 全包已通过。
-补丁及基线保存在 `patches/kata/`；`scripts/bootstrap-kata.sh` 逐个应用并核对完整 Git tree，已有脏 checkout 不会被覆盖。
+`kata/` 是固定到公开 fork SHA 的干净 submodule；补丁及上游基线保存在
+`patches/kata/`，`scripts/bootstrap-kata.sh` 默认核对 submodule 的完整 Git
+tree，也支持逐个应用补丁来验证可复现性。
 
 ## 修订后的提交边界
 

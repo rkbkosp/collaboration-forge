@@ -1,4 +1,4 @@
-module go.local/collab-forge
+module github.com/rkbkosp/collaboration-forge
 
 go 1.27.0
 

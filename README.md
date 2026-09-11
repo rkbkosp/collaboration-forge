@@ -6,14 +6,22 @@ links, events, evidence, and leases; Forge does not create an Issue database.
 
 ## Run
 
-Requires Go 1.27, macOS or Linux, and the patched Kata checkout at `./kata`
-(a separate ignored repository). Use a local filesystem supporting `flock`.
+Requires Go 1.27, macOS or Linux, and a local filesystem supporting `flock`.
+Kata is tracked as a fixed patched submodule at `./kata`.
 
 ```sh
+git submodule update --init --checkout kata
 ./scripts/bootstrap-kata.sh  # applies the pinned, independently committed patches
 go build -o bin/forged ./cmd/forged
 ./bin/forged serve --data-dir .forge --project forge --listen 127.0.0.1:7347
 ```
+
+The `kata` submodule is pinned to the public fork commit
+`rkbkosp/kata@b67a69678c69b00594dde45c2ffd4c2539a35b6b`, based on
+`kenn-io/kata@b1667be5603a308f8c2d44a0d6cbac2463a7eeb2`. The bootstrap script
+verifies that the submodule is clean and matches the patched tree. The
+versioned patch series remains available for independent reconstruction and
+upstream review.
 
 Defaults are shown above. `--listen` accepts only a loopback IP **literal** and
 numeric port, including `[::1]:7347`; wildcard addresses and hostnames are
@@ -186,3 +194,8 @@ npm run test:e2e             # real forged/Pi SDK; includes a real ~60s expiry
 
 See [acceptance evidence and production boundaries](docs/production-readiness.md).
 The current target is supervised, trusted local use—not unrestricted production.
+
+## License
+
+Collab Forge is released under the [MIT License](LICENSE). The `kata/`
+submodule and its public fork remain under Kata's upstream MIT license.

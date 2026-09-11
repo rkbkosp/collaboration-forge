@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.local/collab-forge/internal/forge"
+	"github.com/rkbkosp/collaboration-forge/internal/forge"
 )
 
 func TestTimelineCommandUsesRealForgeEventsAndPaginates(t *testing.T) {

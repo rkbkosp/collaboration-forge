@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"go.local/collab-forge/internal/forge"
+	"github.com/rkbkosp/collaboration-forge/internal/forge"
 	"net/http"
 	"net/http/httptest"
 	"os"

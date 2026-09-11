@@ -6,7 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"go.local/collab-forge/internal/checkout"
+	"github.com/rkbkosp/collaboration-forge/internal/checkout"
 	"io"
 	"net"
 	"net/http"

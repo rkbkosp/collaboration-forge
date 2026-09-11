@@ -34,6 +34,7 @@ type Config struct {
 	DataDir     string
 	ProjectName string
 	AdminToken  string
+	WorkerToken string // optional; enables only the typed worker façade
 }
 
 type persistedConfig struct {
@@ -48,6 +49,8 @@ type Server struct {
 	project   kata.Project
 	config    Config
 	handler   http.Handler
+	tools     http.Handler
+	signer    executionSigner
 	lock      *os.File
 	cancel    context.CancelFunc
 	runDone   chan struct{}
@@ -64,6 +67,11 @@ func New(cfg Config) (_ *Server, err error) {
 	}
 	if err := ValidateAdminToken(cfg.AdminToken); err != nil {
 		return nil, err
+	}
+	if cfg.WorkerToken != "" {
+		if err := ValidateAdminToken(cfg.WorkerToken); err != nil || cfg.WorkerToken == cfg.AdminToken {
+			return nil, errors.New("forge: worker token must be valid and distinct from the supervisor token")
+		}
 	}
 	if strings.TrimSpace(cfg.ProjectName) == "" || strings.Contains(cfg.ProjectName, "#") {
 		return nil, errors.New("forge: invalid project name")
@@ -139,9 +147,13 @@ func New(cfg Config) (_ *Server, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("forge: ensure project: %w", err)
 	}
+	signer, err := loadExecutionSigner(dir)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{service: svc, project: result.Project, config: cfg, lock: lock, cancel: cancel, runDone: make(chan struct{})}
-	s.handler = s.authenticatedHandler(cfg.AdminToken)
+	s := &Server{service: svc, project: result.Project, config: cfg, signer: signer, lock: lock, cancel: cancel, runDone: make(chan struct{})}
+	s.handler = s.authenticatedHandler()
 	go func() {
 		s.runErr = svc.Run(ctx)
 		close(s.runDone)
@@ -170,8 +182,9 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
-func (s *Server) authenticatedHandler(token string) http.Handler {
-	want := sha256.Sum256([]byte(token))
+func (s *Server) authenticatedHandler() http.Handler {
+	want := sha256.Sum256([]byte(s.config.AdminToken))
+	worker := sha256.Sum256([]byte(s.config.WorkerToken))
 	kataHandler := s.service.Handler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/health" {
@@ -184,9 +197,24 @@ func (s *Server) authenticatedHandler(token string) http.Handler {
 		scheme, credential, found := strings.Cut(r.Header.Get("Authorization"), " ")
 		got := sha256.Sum256([]byte(credential))
 		matched := subtle.ConstantTimeCompare(got[:], want[:]) == 1
-		if len(headers) != 1 || !found || !strings.EqualFold(scheme, "Bearer") || !matched {
+		workerMatched := subtle.ConstantTimeCompare(got[:], worker[:]) == 1 && s.config.WorkerToken != ""
+		if len(headers) != 1 || !found || !strings.EqualFold(scheme, "Bearer") || (!matched && !workerMatched) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="forge"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		if r.Method == http.MethodGet && r.URL.Path == "/forge/v1/project" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"project": map[string]any{"id": s.project.ID, "uid": s.project.UID, "name": s.project.Name}, "close_protocol": "close-v2"})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/forge/v1/tools/") && s.tools != nil {
+			s.tools.ServeHTTP(w, r)
+			return
+		}
+		if !matched {
+			http.Error(w, "workers must use the typed Forge façade", http.StatusForbidden)
 			return
 		}
 		if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
@@ -218,7 +246,7 @@ func (supervisorLease) Revalidate(ctx context.Context) error {
 func (hostAccessController) Authorize(ctx context.Context, req kata.AccessRequest) (kata.AccessDecision, error) {
 	lease := supervisorLease{}
 	if req.Principal.Subject != "human:supervisor" || req.Principal.Actor != "Human" {
-		return kata.AccessDecision{}, kata.ErrAccessDenied
+		return authorizeTool(ctx, req)
 	}
 	if err := lease.Revalidate(ctx); err != nil {
 		return kata.AccessDecision{}, err

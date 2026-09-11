@@ -35,14 +35,15 @@ func main() {
 
 func run(ctx context.Context, args []string, output io.Writer) error {
 	if len(args) == 0 || args[0] != "serve" {
-		return errors.New("usage: forged serve [--data-dir DIR] [--project NAME] [--listen IP:PORT] [--admin-token-file FILE]")
+		return errors.New("usage: forged serve [--data-dir DIR] [--project NAME] [--listen IP:PORT] [--admin-token-file FILE] [--worker-token-file FILE]")
 	}
 	flags := flag.NewFlagSet("forged serve", flag.ContinueOnError)
 	flags.SetOutput(output)
 	dir := flags.String("data-dir", ".forge", "private data directory")
 	project := flags.String("project", "forge", "stable project name (must match on restart)")
 	listen := flags.String("listen", "127.0.0.1:7347", "loopback IP literal and port")
-	tokenFile := flags.String("admin-token-file", "", "0600 token file (default: DATA_DIR/admin-token, generated if absent)")
+	tokenFile := flags.String("admin-token-file", "", "0600 supervisor token file (default: DATA_DIR/admin-token, generated if absent)")
+	workerFile := flags.String("worker-token-file", "", "0600 worker token file (default: DATA_DIR/worker-token, generated if absent)")
 	if err := flags.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -59,7 +60,11 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	svc, err := forge.New(forge.Config{DataDir: *dir, ProjectName: *project, AdminToken: token})
+	workerToken, err := loadRoleToken(*dir, *workerFile, "worker-token")
+	if err != nil {
+		return err
+	}
+	svc, err := forge.New(forge.Config{DataDir: *dir, ProjectName: *project, AdminToken: token, WorkerToken: workerToken})
 	if err != nil {
 		return err
 	}
@@ -128,27 +133,31 @@ func validateListen(address string) error {
 }
 
 func loadAdminToken(dir, explicitPath string) (string, error) {
+	return loadRoleToken(dir, explicitPath, "admin-token")
+}
+
+func loadRoleToken(dir, explicitPath, basename string) (string, error) {
 	if err := forge.PrepareDataDir(dir); err != nil {
 		return "", err
 	}
 	path := explicitPath
 	if path == "" {
-		path = filepath.Join(dir, "admin-token")
+		path = filepath.Join(dir, basename)
 	}
 	token, err := readTokenFile(path)
 	if err == nil {
 		return token, nil
 	}
 	if explicitPath != "" || !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("forged: read admin token file: %w", err)
+		return "", fmt.Errorf("forged: read token file: %w", err)
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
-		return "", fmt.Errorf("forged: generate admin token: %w", err)
+		return "", fmt.Errorf("forged: generate token: %w", err)
 	}
 	// Publish a fully written secret atomically without replacing a concurrent
 	// starter's token. Never expose or log the generated credential.
-	f, err := os.CreateTemp(dir, ".admin-token-*")
+	f, err := os.CreateTemp(dir, ".token-*")
 	if err != nil {
 		return "", err
 	}
@@ -181,17 +190,17 @@ func readTokenFile(path string) (string, error) {
 		return "", err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
-		return "", errors.New("admin token file must be a regular file with mode 0600")
+		return "", errors.New("token file must be a regular file with mode 0600")
 	}
 	if info.Size() > 4096 {
-		return "", errors.New("admin token file is too large")
+		return "", errors.New("token file is too large")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 4097))
 	if err != nil {
 		return "", err
 	}
 	if len(data) > 4096 {
-		return "", errors.New("admin token file is too large")
+		return "", errors.New("token file is too large")
 	}
 	token := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
 	if err := forge.ValidateAdminToken(token); err != nil {

@@ -64,6 +64,8 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 		h.dispatch(r.Context(), principal, op, method, path, body, headers).serve(w)
 	}
 	switch operation {
+	case "issue_workspace":
+		h.workspace(w, r, runtime, principal)
 	case "issue_list":
 		in, ok := decodeToolInput[issueListInput](w, r)
 		if !ok {

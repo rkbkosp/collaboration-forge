@@ -4,12 +4,17 @@
   "private": true,
   "type": "module",
   "files": [
+    "extensions/forge.ts",
+    "extensions/README.md",
     "extensions/controller.ts",
     "extensions/config.ts",
     "extensions/schemas.ts"
   ],
   "engines": {
     "node": ">=22.19.0"
+  },
+  "pi": {
+    "extensions": ["./extensions/forge.ts"]
   },
   "scripts": {
     "test": "tsx --test extensions/*.test.ts",

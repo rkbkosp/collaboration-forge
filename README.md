@@ -57,6 +57,23 @@ curl --fail -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json
 unset TOKEN
 ```
 
+## Pi extension
+
+Use Pi 0.85.1 and Node >=22.19:
+
+```sh
+npm ci
+export FORGE_URL=http://127.0.0.1:7347
+export FORGE_WORKER_TOKEN_FILE="$PWD/.forge/worker-token"
+pi -e ./extensions/forge.ts
+```
+
+Claim an issue before editing. Heartbeat is automatic; other sessions can still
+comment, create issues and add links. New runtimes never restore an old execution
+from Pi history. Unknown/lost lease state blocks stock editing tools. See
+[extension setup and lifecycle](extensions/README.md), including the limits of
+cooperative filesystem preflight and exact retry rules after an uncertain close.
+
 ## State and lifecycle
 
 The data directory is 0700; Forge-owned files are 0600. `config.json` persists

@@ -73,9 +73,16 @@ func (m *codexRuntime) event(w http.ResponseWriter, r *http.Request, digest [32]
 	t.lastSeen = time.Now()
 	if in.Event == "interrupt" || in.Event == "pause" {
 		t.paused = true
+		m.markWorkspaces(t, "paused")
 	}
 	if in.Event == "prompt" {
 		t.paused = false
+		m.refreshCodex(t)
+		if t.active != nil && !t.unknown {
+			m.markWorkspaces(t, "ready")
+		} else {
+			m.markWorkspaces(t, "orphaned")
+		}
 	}
 	if in.Event == "stop_check" || in.Event == "context" {
 		m.refreshCodex(t)

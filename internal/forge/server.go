@@ -31,10 +31,11 @@ var ErrDataDirLocked = errors.New("forge: data directory is already locked")
 // AdminToken is required, is never persisted here, and must be at least 32
 // printable ASCII characters without whitespace. Treat it as a supervisor secret.
 type Config struct {
-	DataDir     string
-	ProjectName string
-	AdminToken  string
-	WorkerToken string // optional; enables only the typed worker façade
+	WorkspaceRoot string // managed filesystem artifacts, not an Issue database
+	DataDir       string
+	ProjectName   string
+	AdminToken    string
+	WorkerToken   string // optional; enables only the typed worker façade
 }
 
 type persistedConfig struct {
@@ -156,6 +157,15 @@ func New(cfg Config) (_ *Server, err error) {
 	s := &Server{service: svc, project: result.Project, config: cfg, signer: signer, lock: lock, cancel: cancel, runDone: make(chan struct{})}
 	s.tools = newToolHandler(svc.Handler(), result.Project, signer)
 	s.codex = newCodexRuntime(s.tools)
+	workspaceRoot := cfg.WorkspaceRoot
+	if workspaceRoot == "" {
+		workspaceRoot = filepath.Join(dir, "workspaces")
+	}
+	s.codex.workspaces, err = newWorkspaceStore(filepath.Join(workspaceRoot, result.Project.UID), result.Project.UID)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
 	s.handler = s.authenticatedHandler()
 	go func() {
 		codexDone := make(chan struct{})
@@ -184,7 +194,9 @@ func (s *Server) Wait() error {
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
-		s.closeErr = errors.Join(s.Wait(), s.service.Close(), unlock(s.lock))
+		runErr := s.Wait()
+		s.codex.workspaces.close()
+		s.closeErr = errors.Join(runErr, s.service.Close(), unlock(s.lock))
 	})
 	return s.closeErr
 }

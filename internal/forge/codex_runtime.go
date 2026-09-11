@@ -17,12 +17,13 @@ import (
 // Ephemeral coordination only. Kata remains the lease/issue/event authority.
 // Restart rejects all old instance capabilities; no execution is restored.
 type codexRuntime struct {
-	mu        sync.Mutex
-	instances map[string]*codexInstance
-	threads   map[codexIdentity]*codexThread
-	ended     map[codexSessionKey]bool
-	tools     http.Handler
-	alive     func(int, string) bool
+	workspaces *workspaceStore
+	mu         sync.Mutex
+	instances  map[string]*codexInstance
+	threads    map[codexIdentity]*codexThread
+	ended      map[codexSessionKey]bool
+	tools      http.Handler
+	alive      func(int, string) bool
 }
 type codexInstance struct {
 	token   [32]byte
@@ -59,6 +60,7 @@ type codexPending struct {
 	params    json.RawMessage
 	signature string
 	key       string
+	claim     string
 	token     string
 }
 type codexCommand struct {
@@ -139,7 +141,12 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			m.instances[in.Instance] = &codexInstance{token: digest, pid: in.PID, birth: birth, ttl: ttl}
 		}
-		codexReply(w, map[string]any{"registered": true, "protocol": 1})
+		reply := map[string]any{"registered": true, "protocol": 1}
+		if m.workspaces != nil {
+			reply["workspace_root"] = m.workspaces.root
+			reply["project_uid"] = m.workspaces.project
+		}
+		codexReply(w, reply)
 		return
 	}
 	if op == "end" {
@@ -261,11 +268,19 @@ func codexSafe(v any, secrets ...string) any {
 	return v
 }
 func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string, params json.RawMessage) {
+	if strings.HasPrefix(op, "checkout") {
+		m.checkoutCommand(w, t, op, params)
+		return
+	}
+	if op == "issue_close" && m.checkoutBusy(t) {
+		codexFail(w, 409, "checkout_busy")
+		return
+	}
 	if op == "status" || op == "touch" || op == "start" {
 		if t.active != nil && !time.Now().Before(t.active.deadline) {
 			t.active = nil
 		}
-		codexReply(w, map[string]any{"active": t.active != nil, "pending": t.pending != nil, "paused": t.paused, "unknown": t.unknown, "issue": func() string {
+		codexReply(w, map[string]any{"workspaces": m.threadWorkspaces(t), "active": t.active != nil, "pending": t.pending != nil, "paused": t.paused, "unknown": t.unknown, "issue": func() string {
 			if t.active != nil {
 				return t.active.ref
 			}
@@ -342,6 +357,9 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 			}
 			params = marshalCodex(p)
 			t.pending = &codexPending{op: op, params: params, signature: signature, key: key, token: token}
+			if t.active != nil {
+				t.pending.claim = t.active.claim
+			}
 		}
 	} else {
 		switch op {
@@ -408,6 +426,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 		}
 		t.unknown = false
 		if op == "issue_claim" {
+			m.markWorkspaces(t, "orphaned")
 			t.paused = false
 		}
 		t.active = &codexTenure{ref: uid, alias: alias, claim: claim, token: token, deadline: deadline}
@@ -418,10 +437,14 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 			codexFail(w, 502, "codex_operation_unknown")
 			return
 		}
+		if t.pending != nil {
+			body["workspace_archive"] = m.archiveWorkspaces(t, t.pending.claim)
+		}
 		t.active = nil
 		t.unknown = false
 	}
 	if op == "issue_release" {
+		m.markWorkspaces(t, "orphaned")
 		t.active = nil
 		t.unknown = false
 	}
@@ -465,6 +488,7 @@ func (m *codexRuntime) tick() {
 				t.retired = true
 			}
 			if t.retired {
+				m.markWorkspaces(t, "orphaned")
 				if t.release && t.active != nil {
 					m.dispatch(t, "issue_release", marshalCodex(map[string]string{"ref": t.active.ref, "reason": "codex_normal_end"}), t.active.token, "")
 				}
@@ -474,9 +498,13 @@ func (m *codexRuntime) tick() {
 				return
 			}
 			if t.active == nil || t.paused {
+				if t.active == nil && (t.pending == nil || t.pending.op != "issue_close") {
+					m.markWorkspaces(t, "orphaned")
+				}
 				return
 			}
 			if !time.Now().Before(t.active.deadline) {
+				m.markWorkspaces(t, "orphaned")
 				t.active = nil
 				return
 			}

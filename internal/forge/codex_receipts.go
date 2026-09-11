@@ -20,7 +20,7 @@ func (m *codexRuntime) command(w http.ResponseWriter, t *codexThread, in codexCo
 		codexFail(w, 400, "request_id_required")
 		return
 	}
-	mutation := in.Operation == "issue_claim" || in.Operation == "issue_close" || in.Operation == "issue_release" || in.Operation == "issue_renew" || in.Operation == "issue_create" || in.Operation == "issue_comment" || in.Operation == "issue_link" || in.Operation == "retry"
+	mutation := in.Operation == "checkout" || in.Operation == "issue_claim" || in.Operation == "issue_close" || in.Operation == "issue_release" || in.Operation == "issue_renew" || in.Operation == "issue_create" || in.Operation == "issue_comment" || in.Operation == "issue_link" || in.Operation == "retry"
 	if !mutation {
 		if in.Operation == "status" {
 			m.refreshCodex(t)

@@ -53,6 +53,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("forged serve", flag.ContinueOnError)
 	flags.SetOutput(output)
 	dir := flags.String("data-dir", ".forge", "private data directory")
+	workspaceRoot := flags.String("workspace-root", "", "managed checkout root outside source repositories (default: DATA_DIR/workspaces)")
 	project := flags.String("project", "forge", "stable project name (must match on restart)")
 	listen := flags.String("listen", "127.0.0.1:7347", "loopback IP literal and port")
 	tokenFile := flags.String("admin-token-file", "", "0600 supervisor token file (default: DATA_DIR/admin-token, generated if absent)")
@@ -77,7 +78,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	svc, err := forge.New(forge.Config{DataDir: *dir, ProjectName: *project, AdminToken: token, WorkerToken: workerToken})
+	svc, err := forge.New(forge.Config{WorkspaceRoot: *workspaceRoot, DataDir: *dir, ProjectName: *project, AdminToken: token, WorkerToken: workerToken})
 	if err != nil {
 		return err
 	}

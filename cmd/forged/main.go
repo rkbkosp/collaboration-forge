@@ -27,13 +27,20 @@ import (
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, os.Args[1:], os.Stderr); err != nil {
+	output := os.Stderr
+	if len(os.Args) > 1 && os.Args[1] == "timeline" {
+		output = os.Stdout
+	}
+	if err := run(ctx, os.Args[1:], output); err != nil {
 		fmt.Fprintln(os.Stderr, "forged:", err)
 		os.Exit(1)
 	}
 }
 
 func run(ctx context.Context, args []string, output io.Writer) error {
+	if len(args) > 0 && args[0] == "timeline" {
+		return runTimeline(ctx, args[1:], output)
+	}
 	if len(args) == 0 || args[0] != "serve" {
 		return errors.New("usage: forged serve [--data-dir DIR] [--project NAME] [--listen IP:PORT] [--admin-token-file FILE] [--worker-token-file FILE]")
 	}

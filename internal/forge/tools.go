@@ -79,6 +79,12 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 			query.Set("status", in.Status)
 		}
 		forward("listIssues", http.MethodGet, base+"?"+query.Encode(), nil, nil)
+	case "issue_timeline":
+		in, ok := decodeToolInput[issueTimelineInput](w, r)
+		if !ok {
+			return
+		}
+		h.timeline(r.Context(), principal, in).serve(w)
 	case "issue_get":
 		in, ok := decodeToolInput[issueGetInput](w, r)
 		if !ok {

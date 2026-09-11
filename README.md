@@ -74,6 +74,20 @@ from Pi history. Unknown/lost lease state blocks stock editing tools. See
 [extension setup and lifecycle](extensions/README.md), including the limits of
 cooperative filesystem preflight and exact retry rules after an uncertain close.
 
+## Human timeline
+
+```sh
+./bin/forged timeline ISSUE_UID
+# Optional: --url http://127.0.0.1:7347 --token-file /private/admin-token
+```
+
+The terminal view reads Kata events: actor, comment, execution acquire/renew,
+links/dependencies, close reason and typed evidence, release/expiry. It does not
+create a second audit store. Pagination scans project events while filtering the
+issue and incoming relations. Purged history and page-limit truncation are
+explicit; use the reported `--after-id` cursor to continue. Evidence is what was
+submitted, not an independent attestation that a command succeeded.
+
 ## State and lifecycle
 
 The data directory is 0700; Forge-owned files are 0600. `config.json` persists

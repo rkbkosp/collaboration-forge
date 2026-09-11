@@ -10,6 +10,7 @@ Kata's JSON, with bounded 8 MiB capture. Errors use `{status,error:{code,message
 | --- | --- |
 | issue_list | optional status (open/closed), limit (1–1000) |
 | issue_get | ref |
+| issue_timeline | ref, optional after_id/limit (read projection, used by human CLI) |
 | issue_graph | ref, optional depth (1–10) |
 | issue_create | title, optional body |
 | issue_comment | ref, body |

@@ -165,7 +165,14 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 		}
 		uid := projection.Issue.UID
 		principal.Subject = h.signer.identity(runtime, in.AttemptID, uid)
-		result := h.dispatch(r.Context(), principal, "acquireIssueLease", http.MethodPost, base+"/"+uid+"/lease/actions/acquire", toolTimedLeaseBody{ClaimKind: "timed", TTLSeconds: ttl, Purpose: in.Purpose}, nil)
+		// Kata's claim event actor is its opaque holder identity. Preserve a
+		// server-derived link to the same actor shown on comments and close,
+		// without exposing the private logical-acquire nonce or token.
+		purpose := principal.Actor + " [Pi session " + runtime + "]"
+		if in.Purpose != "" {
+			purpose += ": " + in.Purpose
+		}
+		result := h.dispatch(r.Context(), principal, "acquireIssueLease", http.MethodPost, base+"/"+uid+"/lease/actions/acquire", toolTimedLeaseBody{ClaimKind: "timed", TTLSeconds: ttl, Purpose: purpose}, nil)
 		if !result.success() {
 			result.serve(w)
 			return

@@ -30,6 +30,7 @@ type codexInstance struct {
 	birth   string
 	retired bool
 	normal  bool
+	ttl     int
 }
 type codexThread struct {
 	mu            sync.Mutex
@@ -47,6 +48,7 @@ type codexThread struct {
 	receiptOrder  []string
 	receiptBytes  int
 	lastExecution []byte
+	lastOperation string
 }
 type codexTenure struct {
 	ref, alias, token, claim string
@@ -103,11 +105,17 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		in, ok := decodeToolInput[struct {
 			Instance string `json:"instance_id"`
 			PID      int    `json:"pid"`
+			TTL      *int   `json:"ttl_seconds,omitempty"`
 		}](w, r)
 		if !ok {
 			return
 		}
 		if !codexID(in.Instance) {
+			codexFail(w, 400, "validation")
+			return
+		}
+		ttl, validTTL := toolBoundedInt(in.TTL, 300, 60, 3600)
+		if !validTTL {
 			codexFail(w, 400, "validation")
 			return
 		}
@@ -120,7 +128,7 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer m.mu.Unlock()
 		old := m.instances[in.Instance]
 		if old != nil {
-			if old.token != digest || old.pid != in.PID || old.birth != birth || old.retired {
+			if old.token != digest || old.pid != in.PID || old.birth != birth || old.ttl != ttl || old.retired {
 				codexFail(w, 409, "instance_conflict")
 				return
 			}
@@ -129,7 +137,7 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				codexFail(w, 429, "runtime_limit")
 				return
 			}
-			m.instances[in.Instance] = &codexInstance{token: digest, pid: in.PID, birth: birth}
+			m.instances[in.Instance] = &codexInstance{token: digest, pid: in.PID, birth: birth, ttl: ttl}
 		}
 		codexReply(w, map[string]any{"registered": true, "protocol": 1})
 		return
@@ -317,7 +325,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 					return
 				}
 				p["attempt_id"] = codexNonce()
-				p["ttl_seconds"] = 300
+				p["ttl_seconds"] = t.instance.ttl
 			} else {
 				if t.active == nil || ref != t.active.ref && ref != t.active.alias {
 					codexFail(w, 409, "lease_required")
@@ -329,7 +337,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 					key = codexNonce()
 				}
 				if op == "issue_renew" {
-					p["ttl_seconds"] = 300
+					p["ttl_seconds"] = t.instance.ttl
 				}
 			}
 			params = marshalCodex(p)
@@ -387,7 +395,7 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 			codexFail(w, 409, "lease_lost")
 			return
 		}
-		deadline := started.Add(min(expiry.Sub(serverNow), 300*time.Second) - time.Second)
+		deadline := started.Add(min(expiry.Sub(serverNow), time.Duration(t.instance.ttl)*time.Second) - time.Second)
 		if !time.Now().Before(deadline) {
 			t.active = nil
 			t.pending = nil
@@ -399,8 +407,11 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 			alias = t.active.alias
 		}
 		t.unknown = false
+		if op == "issue_claim" {
+			t.paused = false
+		}
 		t.active = &codexTenure{ref: uid, alias: alias, claim: claim, token: token, deadline: deadline}
-		t.nextRenew = time.Now().Add(30 * time.Second)
+		t.nextRenew = time.Now().Add(min(30*time.Second, time.Duration(t.instance.ttl)*time.Second/3))
 	}
 	if op == "issue_close" {
 		if _, ok := body["changed"].(bool); !ok || body["issue"] == nil {
@@ -408,9 +419,11 @@ func (m *codexRuntime) execute(w http.ResponseWriter, t *codexThread, op string,
 			return
 		}
 		t.active = nil
+		t.unknown = false
 	}
 	if op == "issue_release" {
 		t.active = nil
+		t.unknown = false
 	}
 	if execution || op == "issue_claim" || op == "issue_close" {
 		t.pending = nil
@@ -471,8 +484,8 @@ func (m *codexRuntime) tick() {
 				return
 			}
 			if !time.Now().Before(t.nextRenew) {
-				m.execute(httptest.NewRecorder(), t, "issue_renew", marshalCodex(map[string]string{"ref": t.active.ref}))
 				t.nextRenew = time.Now().Add(5 * time.Second)
+				m.execute(httptest.NewRecorder(), t, "issue_renew", marshalCodex(map[string]string{"ref": t.active.ref}))
 			}
 		}(t)
 	}

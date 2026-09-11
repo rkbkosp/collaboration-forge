@@ -1,3 +1,4 @@
+import { directFetch } from '../extensions/direct-fetch.ts';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { loadConfig } from '../extensions/config.ts';
@@ -17,7 +18,7 @@ export async function codexRPC(op:string,body:unknown,env:NodeJS.ProcessEnv=proc
  const config=await loadConfig(env);
  const token=await instanceToken(env.FORGE_CODEX_TOKEN_FILE??'');
  try{
-  const response=await fetch(config.url+'/forge/v1/codex/'+op,{method:'POST',redirect:'error',headers:{Authorization:'Bearer '+config.workerToken,'X-Forge-Codex-Token':token,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(timeout)});
+  const response=await directFetch(config.url+'/forge/v1/codex/'+op,{method:'POST',redirect:'error',headers:{Authorization:'Bearer '+config.workerToken,'X-Forge-Codex-Token':token,'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(timeout)});
   const reader=response.body?.getReader();let size=0;const chunks:Uint8Array[]=[];
   if(reader)for(;;){const x=await reader.read();if(x.done)break;size+=x.value.length;if(size>8<<20){await reader.cancel();throw new Error();}chunks.push(x.value);}
   const result=JSON.parse(Buffer.concat(chunks).toString('utf8'));

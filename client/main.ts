@@ -1,3 +1,5 @@
+import { codexTool } from '../codex/facade.ts';
+import { CodexError } from '../codex/transport.ts';
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -15,6 +17,8 @@ const stringFlags = ['url','worker-token-file','admin-token-file','socket','sess
 const boolFlags = ['help','version','all','clear-owner'];
 const HELP = `Forge client — JSON output; credentials are FILE paths, never token arguments.
 
+forge codex [Codex arguments...]  (daemon renewal + lifecycle hooks)
+forge codex --help-forge
 forge health | project
 forge issue list [--status open|closed] [--limit N]
 forge issue get REF | graph REF [--depth 1..10]
@@ -133,6 +137,10 @@ export async function main(argv: string[]): Promise<number> {
       usage('Unsupported read operation');
     }
     async function call(op:string,params:unknown={}):Promise<any> {
+      if(env.FORGE_CODEX_INSTANCE_ID && op.startsWith('issue_')){
+        if(f.socket!==undefined||f['session-id']!==undefined)usage('Codex identity is harness-owned; do not override socket/session');
+        try{return await codexTool(op,params,env);}catch(e){if(e instanceof CodexError)throw new ForgeError(e.code,e.code,0,e.ambiguous);throw e;}
+      }
       if(socket)return requestSession(socket,{op,params});
       if(['issue_claim','issue_renew','issue_release','issue_close'].includes(op))usage('Execution requires a live session: forge session start, then --socket PATH');
       if(op==='issue_timeline'||op==='project')return extra(op,params);
@@ -154,6 +162,7 @@ export async function main(argv: string[]): Promise<number> {
       output({installed:target});return 0;
     }
     if(words[0]==='session') {
+      if(env.FORGE_CODEX_INSTANCE_ID)usage('Codex uses daemon execution state; use forge codex status/retry/pause');
       count(2);flags();
       const action=words[1];
       if(action==='start') {

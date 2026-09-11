@@ -3,6 +3,7 @@ package forge
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -86,6 +87,9 @@ func TestCodexRuntimeRenewsWithoutClientTouchAndEndsNormally(t *testing.T) {
 	if renew != 1 {
 		t.Fatal("no daemon renewal")
 	}
+	if time.Until(m.threads[i].nextRenew) < 25*time.Second {
+		t.Fatal("successful renewal must keep normal cadence, not retry cadence")
+	}
 	codexRequest(m, "end", map[string]any{"instance_id": "i", "normal": true}, codexTestToken)
 	m.tick()
 	if release != 1 {
@@ -153,7 +157,13 @@ func TestCodexResultReplayCannotRepeatMutationOrCrossTenure(t *testing.T) {
 	toolsSuccess(t, first)
 	again := codexRequest(m, "tool", cmd, codexTestToken)
 	toolsSuccess(t, again)
-	if !bytes.Equal(first.Body.Bytes(), again.Body.Bytes()) {
+	var initial, replayed map[string]any
+	json.Unmarshal(first.Body.Bytes(), &initial)
+	json.Unmarshal(again.Body.Bytes(), &replayed)
+	if replayed["client_replayed"] != true || replayed["current_state_not_refreshed"] != true {
+		t.Fatal("historical response not marked")
+	}
+	if fmt.Sprint(initial["lease"]) != fmt.Sprint(replayed["lease"]) {
 		t.Fatal("original response not recovered")
 	}
 	cmd.Params = marshalCodex(map[string]string{"ref": "different"})
@@ -236,5 +246,9 @@ func TestCodexPendingCloseAfterExpiryStillReplaysKataReceipt(t *testing.T) {
 	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "retry"}, codexTestToken))
 	if closeCalls != 2 {
 		t.Fatal("receipt retry missing")
+	}
+	w := codexRequest(m, "tool", codexCommand{Identity: i, Operation: "retry"}, codexTestToken)
+	if !strings.Contains(w.Body.String(), `"client_operation":"issue_close"`) {
+		t.Fatal("historical retry must identify the resolved close, not the previous claim")
 	}
 }

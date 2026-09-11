@@ -101,6 +101,14 @@ JSON/file inputs, exit codes, safety boundaries and recovery are documented in
 `forge admin ...` requires a separate supervisor credential; it never falls back
 to the worker token. See [client acceptance](docs/client-acceptance.md).
 
+## Codex adapter
+
+Use `forge codex` to launch Codex with a fresh runtime instance. Standard
+`forge issue` commands then use daemon-owned execution and automatic renewal;
+no background session broker is needed. Install/trust the command hooks for
+session/subagent context, compaction recovery, bounded Stop checks and cleanup.
+See [Codex setup, lifecycle and retry semantics](docs/codex.md).
+
 ## Pi extension
 
 Use Pi 0.85.1 and Node >=22.19:

@@ -21,12 +21,12 @@ export async function launchCodex(args:string[],env:NodeJS.ProcessEnv=process.en
  const dir=await mkdtemp(join(tmpdir(),'forge-codex-'));
  const instance=randomUUID();const file=join(dir,'instance-token');
  const childEnv:NodeJS.ProcessEnv={...env,FORGE_CODEX_INSTANCE_ID:instance,FORGE_CODEX_TOKEN_FILE:file};
- delete childEnv.FORGE_SOCKET;
+ delete childEnv.FORGE_SOCKET;delete childEnv.FORGE_ADMIN_TOKEN_FILE;
  delete childEnv.CODEX_SESSION_ID;delete childEnv.CODEX_THREAD_ID;
  let registered=false;
  try{
   await writeFile(file,randomBytes(32).toString('hex'),{mode:0o600,flag:'wx'});
-  await deps.register({instance_id:instance,pid:process.pid},childEnv);registered=true;
+  await deps.register({instance_id:instance,pid:process.pid,...(env.FORGE_TTL_SECONDS?{ttl_seconds:Number(env.FORGE_TTL_SECONDS)}:{})},childEnv);registered=true;
   const result=await deps.run(env.FORGE_CODEX_BINARY??'codex',args,childEnv);
   await deps.end({instance_id:instance,normal:result.code===0&&result.signal===null},childEnv).catch(()=>{});
   registered=false;return result.code??1;

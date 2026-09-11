@@ -22,6 +22,9 @@ func (m *codexRuntime) command(w http.ResponseWriter, t *codexThread, in codexCo
 	}
 	mutation := in.Operation == "issue_claim" || in.Operation == "issue_close" || in.Operation == "issue_release" || in.Operation == "issue_renew" || in.Operation == "issue_create" || in.Operation == "issue_comment" || in.Operation == "issue_link" || in.Operation == "retry"
 	if !mutation {
+		if in.Operation == "status" {
+			m.refreshCodex(t)
+		}
 		m.execute(w, t, in.Operation, in.Params)
 		return
 	}
@@ -51,6 +54,16 @@ func (m *codexRuntime) command(w http.ResponseWriter, t *codexThread, in codexCo
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(receipt.status)
+			if receipt.status == 200 {
+				var result map[string]any
+				if json.Unmarshal(receipt.body, &result) == nil {
+					result["client_replayed"] = true
+					result["current_state_not_refreshed"] = true
+					result["client_operation"] = in.Operation
+					json.NewEncoder(w).Encode(result)
+					return
+				}
+			}
 			w.Write(receipt.body)
 			return
 		}
@@ -62,10 +75,18 @@ func (m *codexRuntime) command(w http.ResponseWriter, t *codexThread, in codexCo
 		receipt = &codexReceipt{fingerprint: fingerprint}
 		t.receipts[in.RequestID] = receipt
 	}
+	resolvedOperation := in.Operation
+	if in.Operation == "retry" {
+		resolvedOperation = t.lastOperation
+		if t.pending != nil {
+			resolvedOperation = t.pending.op
+		}
+	}
 	out := httptest.NewRecorder()
 	if in.Operation == "retry" && t.pending == nil && t.lastExecution != nil {
 		var result map[string]any
 		json.Unmarshal(t.lastExecution, &result)
+		result["client_operation"] = t.lastOperation
 		result["client_replayed"] = true
 		result["current_state_not_refreshed"] = true
 		codexReply(out, result)
@@ -86,6 +107,7 @@ func (m *codexRuntime) command(w http.ResponseWriter, t *codexThread, in codexCo
 		}
 		if out.Code == 200 && (in.Operation == "issue_claim" || in.Operation == "issue_close" || in.Operation == "issue_release" || in.Operation == "retry") {
 			t.lastExecution = bytesCopy(out.Body.Bytes())
+			t.lastOperation = resolvedOperation
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

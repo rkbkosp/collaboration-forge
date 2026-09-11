@@ -12,7 +12,9 @@
     "client/",
     "scripts/forge.mjs",
     "skills/collab-forge-client/",
-    "extensions/direct-fetch.ts"
+    "extensions/direct-fetch.ts",
+    "codex/",
+    "scripts/forge-codex-hook.mjs"
   ],
   "engines": {
     "node": ">=22.19.0"
@@ -23,10 +25,13 @@
     ]
   },
   "scripts": {
-    "test": "tsx --test extensions/*.test.ts client/*.test.ts",
+    "test": "tsx --test extensions/*.test.ts client/*.test.ts codex/*.test.ts",
     "test:e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "forge": "node scripts/forge.mjs"
+    "forge": "node scripts/forge.mjs",
+    "test:codex": "tsx --test codex/*.test.ts",
+    "test:codex-e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-e2e.test.ts",
+    "test:codex-live": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-live-smoke.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.1",

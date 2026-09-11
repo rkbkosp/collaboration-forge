@@ -14,6 +14,7 @@
   "include": [
     "extensions/**/*.ts",
     "tests/**/*.ts",
-    "client/**/*.ts"
+    "client/**/*.ts",
+    "codex/**/*.ts"
   ]
 }

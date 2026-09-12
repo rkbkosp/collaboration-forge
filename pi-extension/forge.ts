@@ -11,6 +11,10 @@ export { loadConfig } from "./config.ts";
 export type { ForgeConfig } from "./config.ts";
 
 const descriptions: Record<ToolName, string> = {
+  checkout: "Create an isolated worktree attached to the current claimed issue. Choose dirty:true or commit, and an absolute source or recovery workspace ID. No new claim. On ambiguous failure retry ORIGINAL arguments. Poll checkout_status until ready and use returned worktree as explicit cwd for subsequent tools.",
+  checkout_list: "List retained checkout artifacts for this project or issue; records are not execution authority.",
+  checkout_status: "Read checkout preparation state and worktree path. Never edit a preparing or orphaned workspace as if it were ready.",
+  checkout_archive: "Retry metadata-only archive of a retained workspace after its issue is closed. Files are retained; no merge or deletion.",
   issue_list: "List Forge issues, optionally filtered by status.",
   issue_get: "Read an issue, comments, links and current live lease.",
   issue_graph: "Read an issue dependency/parent graph.",
@@ -67,7 +71,7 @@ export function registerForge(pi: ExtensionAPI, create: (sessionId: string) => P
       name, label: name, description: `${descriptions[name]} Output is limited to 2000 lines/50 KiB; larger redacted results are saved to a 0600 temporary file.`,
       promptSnippet: descriptions[name],
       parameters: toolSchemas[name],
-      executionMode: name === "issue_claim" || name === "issue_renew" || name === "issue_release" || name === "issue_close" ? "sequential" : "parallel",
+      executionMode: name === "checkout" || name === "checkout_archive" || name === "issue_claim" || name === "issue_renew" || name === "issue_release" || name === "issue_close" ? "sequential" : "parallel",
       async execute(_id, params, signal) {
         const current = requireController();
         const result = await current.execute(name, params, signal);

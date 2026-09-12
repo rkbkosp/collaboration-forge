@@ -78,7 +78,7 @@ test('independent executable covers worker sessions, timeline and explicit Human
   assert.equal((await cli(['issue','get',ref],a)).issue.status,'open');
   await cli(['admin','delete',followup.uid,'--confirm',`DELETE e2e#${followup.short_id}`],'',true);
   await cli(['admin','reopen',ref,'--admin-token-file',join(f.dataDir,'worker-token')],'',false,1);
-  await cli(['tool','issue_force_release','--data',JSON.stringify({ref})],b,false,1);
+  await cli(['tool','issue_force_release','--data',JSON.stringify({ref})],b,false,2);
   await cli(['session','stop'],a);await cli(['session','stop'],b);
  } finally {
   await Promise.all(processes.map(async child=>{

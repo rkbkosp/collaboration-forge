@@ -12,8 +12,8 @@ const IO_TIMEOUT = 5_000;
 const REQUEST_TIMEOUT = 30_000;
 const readOps = new Set(["issue_timeline", "project", "health"]);
 const controlOps = new Set(["state", "guard", "context", "retry", "shutdown"]);
-const executionOps = new Set(["issue_claim", "issue_renew", "issue_release", "issue_close"]);
-const mutationOps = new Set([...executionOps, "issue_create", "issue_comment", "issue_link", "retry", "shutdown"]);
+const executionOps = new Set(["checkout", "issue_claim", "issue_renew", "issue_release", "issue_close"]);
+const mutationOps = new Set([...executionOps, "checkout_archive", "issue_create", "issue_comment", "issue_link", "retry", "shutdown"]);
 type Request = { op: string; params?: unknown };
 type Extra = (op: string, params: unknown) => Promise<unknown>;
 const record = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -100,7 +100,7 @@ export async function startSession(socketPath: string, controller: Controller, e
       signal.throwIfAborted();
       if (request.op === "retry") {
         const state = controller.state();
-        if (!state.pendingClaim && !state.pendingClose) {
+        if (!state.pendingClaim && !state.pendingClose && !state.pendingCheckout) {
           if (confirmed) return JSON.parse(confirmed);
           throw failure("no_pending", "No pending request or retained confirmation to retry");
         }
@@ -111,7 +111,7 @@ export async function startSession(socketPath: string, controller: Controller, e
       }
       confirmed = undefined; // Even a definite new-operation failure retires the old confirmation.
       const result = await controller.execute(request.op as ToolName, request.params ?? {}, signal);
-      if (request.op === "issue_claim" || request.op === "issue_close") remember(result);
+      if (request.op === "checkout" || request.op === "issue_claim" || request.op === "issue_close") remember(result);
       return result;
     });
     executionQueue = next.catch(() => {});

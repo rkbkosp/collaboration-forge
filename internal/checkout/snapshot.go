@@ -30,14 +30,21 @@ type Entry struct {
 	Data []byte `json:"data"`
 }
 type Manifest struct {
-	Version    int     `json:"version"`
-	Base       string  `json:"base_commit"`
-	Repository string  `json:"repository_id"`
-	Kind       string  `json:"kind"`
+	Version    int         `json:"version"`
+	Base       string      `json:"base_commit"`
+	Repository string      `json:"repository_id"`
+	Kind       string      `json:"kind"`
+	BundleHash string      `json:"bundle_sha256"`
+	Index      []Entry     `json:"index"`
+	Work       []Entry     `json:"work"`
+	Excluded   string      `json:"excluded"`
+	Submodules []Submodule `json:"submodules,omitempty"`
+}
+type Submodule struct {
+	Path       string  `json:"path"`
+	Commit     string  `json:"commit"`
+	Entries    []Entry `json:"entries"`
 	BundleHash string  `json:"bundle_sha256"`
-	Index      []Entry `json:"index"`
-	Work       []Entry `json:"work"`
-	Excluded   string  `json:"excluded"`
 }
 type Snapshot struct {
 	ID, Path string
@@ -89,6 +96,9 @@ func validPath(p string) bool {
 	return true
 }
 func safeEntry(e Entry) error {
+	if e.Mode == "160000" && validPath(e.Path) && validOID(string(e.Data)) {
+		return nil
+	}
 	if !validPath(e.Path) || (e.Mode != "100644" && e.Mode != "100755" && e.Mode != "120000") || len(e.Data) > maxFile {
 		return errors.New("unsupported snapshot entry")
 	}
@@ -130,11 +140,19 @@ func entries(ctx context.Context, root string, tree bool, ref string) ([]Entry, 
 		mode, oid := f[0], f[1]
 		if tree {
 			oid = f[2]
-			if f[1] != "blob" {
+			if f[1] != "blob" && !(f[1] == "commit" && mode == "160000") {
 				return nil, errors.New("submodules unsupported")
 			}
 		} else if f[2] != "0" {
 			return nil, errors.New("unresolved index stages unsupported")
+		}
+		if mode == "160000" {
+			v := Entry{p, mode, []byte(oid)}
+			if e := safeEntry(v); e != nil {
+				return nil, e
+			}
+			result = append(result, v)
+			continue
 		}
 		b, e := git(ctx, root, nil, "cat-file", "blob", oid)
 		if e != nil {
@@ -213,6 +231,12 @@ func scan(ctx context.Context, root, ref string, dirty bool) (Manifest, error) {
 		return m, e
 	}
 	m.Work = append([]Entry{}, m.Index...)
+	links := map[string]Entry{}
+	for _, v := range m.Index {
+		if v.Mode == "160000" {
+			links[v.Path] = v
+		}
+	}
 	if dirty {
 		m.Kind = "dirty"
 		flags, e := git(ctx, root, nil, "ls-files", "-v", "-z")
@@ -245,6 +269,10 @@ func scan(ctx context.Context, root, ref string, dirty bool) (Manifest, error) {
 				continue
 			}
 			seen[p] = true
+			if link, ok := links[p]; ok {
+				m.Work = append(m.Work, link)
+				continue
+			}
 			v, exists, e := readWork(root, p)
 			if e != nil {
 				return m, e
@@ -254,6 +282,16 @@ func scan(ctx context.Context, root, ref string, dirty bool) (Manifest, error) {
 			}
 		}
 		sort.Slice(m.Work, func(i, j int) bool { return m.Work[i].Path < m.Work[j].Path })
+	}
+	for _, v := range m.Index {
+		if v.Mode != "160000" {
+			continue
+		}
+		sub, err := scanSubmodule(ctx, root, v, dirty)
+		if err != nil {
+			return m, err
+		}
+		m.Submodules = append(m.Submodules, sub)
 	}
 	for _, list := range [][]Entry{m.Index, m.Work} {
 		for _, v := range list {
@@ -348,6 +386,13 @@ func capture(ctx context.Context, o Options, beforeRescan func()) (Snapshot, err
 		return Snapshot{}, e
 	}
 	m.BundleHash = digest(b)
+	for i := range m.Submodules {
+		sub := &m.Submodules[i]
+		sub.BundleHash, e = captureSubmodule(ctx, root, tmp, *sub)
+		if e != nil {
+			return Snapshot{}, e
+		}
+	}
 	if beforeRescan != nil {
 		beforeRescan()
 	}
@@ -356,6 +401,12 @@ func capture(ctx context.Context, o Options, beforeRescan func()) (Snapshot, err
 		return Snapshot{}, e
 	}
 	check.BundleHash = m.BundleHash
+	if len(check.Submodules) != len(m.Submodules) {
+		return Snapshot{}, errors.New("submodules changed during snapshot")
+	}
+	for i := range check.Submodules {
+		check.Submodules[i].BundleHash = m.Submodules[i].BundleHash
+	}
 	a, _ := json.Marshal(m)
 	z, _ := json.Marshal(check)
 	if !bytes.Equal(a, z) {
@@ -439,6 +490,9 @@ func Load(path string) (Snapshot, error) {
 	if e != nil || digest(b) != m.BundleHash {
 		return Snapshot{}, errors.New("snapshot bundle integrity failure")
 	}
+	if e = validateSubmodules(path, m); e != nil {
+		return Snapshot{}, e
+	}
 	for _, list := range [][]Entry{m.Index, m.Work} {
 		seen := map[string]bool{}
 		for _, v := range list {
@@ -495,6 +549,9 @@ func Restore(ctx context.Context, snapshot, dest, branch string) (string, error)
 		return "", e
 	}
 	for _, v := range s.Manifest.Work {
+		if v.Mode == "160000" {
+			continue
+		}
 		p := filepath.Join(w, v.Path)
 		if e = os.MkdirAll(filepath.Dir(p), 0700); e != nil {
 			return "", e
@@ -509,6 +566,11 @@ func Restore(ctx context.Context, snapshot, dest, branch string) (string, error)
 			e = os.WriteFile(p, v.Data, mode)
 		}
 		if e != nil {
+			return "", e
+		}
+	}
+	for _, sub := range s.Manifest.Submodules {
+		if e = restoreSubmodule(ctx, s.Path, w, sub); e != nil {
 			return "", e
 		}
 	}
@@ -540,7 +602,11 @@ func Restore(ctx context.Context, snapshot, dest, branch string) (string, error)
 		return "", e
 	}
 	for _, v := range s.Manifest.Index {
-		oid, e := git(ctx, w, v.Data, "hash-object", "-w", "--stdin")
+		oid := v.Data
+		var e error
+		if v.Mode != "160000" {
+			oid, e = git(ctx, w, v.Data, "hash-object", "-w", "--stdin")
+		}
 		if e != nil {
 			return "", e
 		}

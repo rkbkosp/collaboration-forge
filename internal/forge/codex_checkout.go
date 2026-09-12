@@ -39,6 +39,8 @@ type workspaceRecord struct {
 	Error         string        `json:"error_code,omitempty"`
 	Updated       time.Time     `json:"updated_at"`
 	RecoveredFrom string        `json:"recovered_from,omitempty"`
+	Request       string        `json:"request_hash,omitempty"`
+	Fingerprint   string        `json:"request_fingerprint,omitempty"`
 }
 type workspaceStore struct {
 	lock          *os.File
@@ -330,8 +332,12 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 		kind = "dirty"
 	}
 	r := workspaceRecord{ID: codexNonce(), Project: s.project, Issue: t.active.ref, Tenure: workspaceTenure(t.active.claim), Owner: t.identity, Source: source, Kind: kind, State: "preparing", RecoveredFrom: in.Recover}
+	r.Request, r.Fingerprint = t.workspaceRequest, t.workspaceFingerprint
 	if e = s.put(r); e != nil {
-		delete(s.records, r.ID)
+		// A rename may have committed before directory fsync failed. Preserve
+		// the request identity in memory so a retry cannot create a second job.
+		r.State, r.Error = "failed", "workspace_store_failed"
+		s.records[r.ID] = r
 		<-s.slots
 		s.mu.Unlock()
 		codexFail(w, 503, "workspace_store_failed")
@@ -408,6 +414,10 @@ func (m *codexRuntime) prepareWorkspace(t *codexThread, claim string, r workspac
 	}
 }
 func (m *codexRuntime) workspaceLive(t *codexThread, claim string) bool {
+	if t.workerSession != "" {
+		m.refreshCodex(t)
+		return t.active != nil && !t.unknown && t.active.claim == claim
+	}
 	m.mu.Lock()
 	stopped := t.retired || t.instance.retired || m.ended[codexSessionKey{t.identity.Instance, t.identity.Session}] || !m.alive(t.instance.pid, t.instance.birth)
 	m.mu.Unlock()

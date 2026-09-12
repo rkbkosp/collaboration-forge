@@ -15,6 +15,7 @@
     "scripts/forge-project-root.mjs",
     "skills/collab-forge-client/",
     "pi-extension/direct-fetch.ts",
+    "pi-extension/errors.ts",
     "codex/",
     "scripts/forge-codex-hook.mjs",
     "docs/codex.md",

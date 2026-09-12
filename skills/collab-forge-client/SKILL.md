@@ -20,7 +20,7 @@ Forge 有两个实际入口，底层 Issue/lease 语义相同但 execution runti
 3. `FORGE_URL` 只能为 loopback IP literal。不能改为远程地址、开启未认证 listener 或直接改 Kata DB。
 4. **CLI worker** 为每个独立 worker 建立自己的新 session broker。不要复用其他 Agent 的 socket、nonce、proof 或历史 execution；broker 是 execution runtime，短命 CLI 调用只是其客户端。Pi 不使用 broker/socket，而是在每个 Pi runtime 内创建全新的 Controller。
 5. CLI 写文件、edit/apply_patch、运行会修改文件的 shell 前执行 `forge session guard`，必须 exit 0 且 `allowed:true`。Pi 则由 `tool_call` hook 自动对 `edit`、`write`、`bash`、`apply_patch` 做同等 exact-lease preflight。两者都是协作 preflight，不会取消已经运行的 shell，也不是文件系统沙箱。
-6. 在**已成功初始化的 runtime** 中，不持 lease 仍可 list/get/graph/timeline/create/comment/link；冲突时贡献发现，不能强行执行或谎称取得 lease。Pi 配置失败时没有 Controller，十个 Forge model tools 都不可用；不要把“无 lease 可贡献”误解为“配置不可用时仍能调用”。
+6. 在**已成功初始化的 runtime** 中，不持 lease 仍可 list/get/graph/timeline/create/comment/link；冲突时贡献发现，不能强行执行或谎称取得 lease。Pi 配置失败时没有 Controller，所有 Forge model tools 都不可用；不要把“无 lease 可贡献”误解为“配置不可用时仍能调用”。
 7. 只有真实执行过的测试、存在的 commit/PR、实际审查路径可作 evidence。提交 evidence 不等于服务端替你验证内容。
 8. CLI 遇到不确定 acquire/close 后保持 broker 活着，使用 `forge session retry` 重放原请求。Pi 没有 `forge session retry` 命令或 retry model tool；再次调用 `issue_claim`/`issue_close` 时必须使用原始完整参数，由插件重用原 attempt、execution proof 和 close key。不要改 body、生成新 key、先 acquire 新 lease 或绕过 receipt replay 做 live preflight。
 9. CLI broker 崩溃/重启后不恢复旧执行；新 broker 使用新目录/socket，等待旧 TTL 回收。Pi reload/new/resume/fork/clone 会结束旧 runtime 并创建 fresh runtime；crash 同样不依赖 cleanup，等待 TTL。请 Human 检查 issue/timeline 确认不确定的 close。
@@ -64,15 +64,16 @@ Pi 的 extension discovery 规则进行。
 
 ### 工具、续租与关闭
 
-Pi 注册十个严格 schema 的 model tools：
+Pi 注册十四个严格 schema 的 model tools：
 `issue_list`、`issue_get`、`issue_graph`、`issue_create`、`issue_comment`、
-`issue_link`、`issue_claim`、`issue_renew`、`issue_release`、`issue_close`。
+`issue_link`、`issue_claim`、`issue_renew`、`issue_release`、`issue_close`，以及
+`checkout`、`checkout_list`、`checkout_status`、`checkout_archive`。
 工具不能提交 authority、execution token/attempt、force/replace 或 retry protocol
 字段；`issue_close` 的 evidence 是 typed Kata evidence，不是任意字符串。读取、
 创建、评论和添加 link 不要求 execution lease；有 Controller 时先 claim 一个
 issue，才能编辑工作树。
 
-`issue_claim`、`issue_renew`、`issue_release`、`issue_close` 按 sequential 模式
+`checkout`、`checkout_archive`、`issue_claim`、`issue_renew`、`issue_release`、`issue_close` 按 sequential 模式
 执行，其余工具可 parallel。heartbeat 自动按 `min(TTL/3, 30s)` 续租。每次
 `edit`、`write`、`bash`、`apply_patch` 前，Pi hook 都通过 `issue_get` 检查当前
 exact ClaimUID、issue UID 和 principal tuple；同 holder 的新 ClaimUID 也不是旧
@@ -102,6 +103,21 @@ parallel-tool 的 preflight-to-write race；服务端事务 close fencing 才是
 普通 agent turn 完成不是 `session_shutdown`，不会自动 release。Pi 默认请求超时 10 秒，shutdown release 上限约 1.5 秒。
 
 ## CLI broker 工作流
+
+### 已认领 Issue 的独立工作区
+
+CLI 使用已有 session：`forge checkout ISSUE --dirty --source /绝对仓库 --socket SOCKET`，
+也可用 `--ref COMMIT`。Pi 使用 `checkout` tool，参数为 `ref`、绝对 `source`，以及
+`dirty:true` 或 `commit`。同一个 Issue 可以逐仓库创建多个工作区，沿用同一 lease。
+轮询 status 到 `ready` 后，把返回的 `worktree` 作为后续工具的显式 cwd；checkout
+不能改变父进程目录。宿主 wrapper 不支持隔离目录/socket 时，CLI 用安装入口的绝对
+路径和同一 socket；Pi 继续用已注册工具，不启动另一 broker。
+
+不确定的 checkout：CLI 用同一 socket 的 `session retry`；Pi 重复原始完整 checkout
+参数。不能换参数猜结果。close 会归档本 tenure 的所有工作区元数据，保留文件，不
+自动 merge。新 runtime 先重新 claim，再用 `recover`/`--recover` 复制旧工作区到新目录。
+直接固定提交子模块可离线捕获；dirty 子模块和嵌套子模块拒绝。需要匹配的 daemon/
+CLI/extension，源码更新不等于服务已切换。
 
 ### 1. 确认服务与任务
 

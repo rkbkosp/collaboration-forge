@@ -220,12 +220,12 @@ export async function main(argv: string[]): Promise<number> {
     }
     async function call(op:string,params:unknown={}):Promise<any> {
       if(!Object.hasOwn(toolSchemas,op) && !['issue_timeline','project'].includes(op))usage('Unknown worker operation');
-      if(env.FORGE_CODEX_INSTANCE_ID && op.startsWith('issue_')){
+      if(env.FORGE_CODEX_INSTANCE_ID && (op.startsWith('issue_')||op.startsWith('checkout'))){
         if(f.socket!==undefined||f['session-id']!==undefined)usage('Codex identity is harness-owned; do not override socket/session');
         try{return await codexTool(op,params,env);}catch(e){if(e instanceof CodexError)throw new ForgeError(e.code,e.message,e.status,e.ambiguous,{hint:e.hint,data:e.data});throw e;}
       }
       if(socket)return requestSession(socket,{op,params});
-      if(['issue_claim','issue_renew','issue_release','issue_close'].includes(op))usage('Execution requires a live session: forge session start, then --socket PATH');
+      if(['checkout','issue_claim','issue_renew','issue_release','issue_close'].includes(op))usage('Execution requires a live session: forge session start, then --socket PATH');
       if(op==='issue_timeline'||op==='project')return extra(op,params);
       return (await worker()).execute(op as ToolName,params);
     }

@@ -44,7 +44,7 @@ const realClock: Clock = {
   clearTimeout: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
 };
 const editTools = new Set(["edit", "write", "bash", "apply_patch"]);
-const mutationTools = new Set(["issue_claim", "issue_renew", "issue_release", "issue_close", "issue_create", "issue_comment", "issue_link"]);
+const mutationTools = new Set(["checkout", "checkout_archive", "issue_claim", "issue_renew", "issue_release", "issue_close", "issue_create", "issue_comment", "issue_link"]);
 const secretKey = /^(execution[_-]?token|worker[_-]?token|authorization|x-forge-execution|token)$/i;
 const privateKey = /^(execution[_-]?id|attempt[_-]?id)$/i;
 const object = (value: unknown): ObjectJSON => value !== null && typeof value === "object" && !Array.isArray(value) ? value as ObjectJSON : {};
@@ -78,6 +78,7 @@ export class Controller {
   #leaseView: unknown = null;
   #pendingClaim?: PendingClaim;
   #pendingClose?: PendingClose;
+  #pendingCheckout?: PendingClose;
   readonly #retryRequests = new WeakMap<object, PendingClaim | PendingClose>();
   #timer?: unknown;
   #queue: Promise<unknown> = Promise.resolve();
@@ -107,7 +108,7 @@ export class Controller {
   state() {
     this.#checkExpiry();
     return this.sanitize({ mode: this.#mode, reason: this.#reason, issueUID: this.#boundRef,
-      claimUID: this.#active?.claimUID, pendingClaim: !!this.#pendingClaim, pendingClose: !!this.#pendingClose });
+      claimUID: this.#active?.claimUID, pendingClaim: !!this.#pendingClaim, pendingClose: !!this.#pendingClose, pendingCheckout: !!this.#pendingCheckout });
   }
 
   /** All outward results are redacted, including nested fields and echoed values. */
@@ -137,13 +138,15 @@ export class Controller {
     const retry = params && typeof params === "object" ? this.#retryRequests.get(params) : undefined;
     return this.#exclusive(async () => {
       this.#assertRunning();
-      if (retry && retry !== this.#pendingClose && retry !== this.#pendingClaim) {
+      if (retry && retry !== this.#pendingClose && retry !== this.#pendingClaim && retry !== this.#pendingCheckout) {
         throw new ForgeError("no_pending", "The original pending request already finished; no new operation was attempted");
       }
       validateParams(name, params);
       // Own the request data before any await; external callers cannot mutate retries.
       const body = JSON.parse(JSON.stringify(params)) as ObjectJSON;
       signal?.throwIfAborted();
+      if (name === "checkout") return this.#checkout(body,signal);
+      if (this.#pendingCheckout && ["issue_claim","issue_close","issue_release"].includes(name)) throw new ForgeError("pending_checkout","Resolve the original checkout request before changing execution");
       if (name === "issue_claim") return this.#claim(body, signal);
       if (name === "issue_renew") return this.#renew(body, signal);
       if (name === "issue_release") return this.#release(body, signal);
@@ -165,13 +168,13 @@ export class Controller {
    * private attempt/TTL fields, while close signatures already use canonical ref. */
   async retryPending(signal?: AbortSignal): Promise<ObjectJSON> {
     this.#assertRunning();
-    const pending = this.#pendingClose ?? this.#pendingClaim;
-    if (!pending) throw new ForgeError("no_pending", "No pending claim or close request to retry");
+    const pending = this.#pendingCheckout ?? this.#pendingClose ?? this.#pendingClaim;
+    if (!pending) throw new ForgeError("no_pending", "No pending checkout, claim or close request to retry");
     const params = JSON.parse(pending.signature) as ObjectJSON;
     // Check identity again inside execute's queue: an earlier retry can finish
     // and a new tenure can start before this retry reaches the front.
     this.#retryRequests.set(params, pending);
-    return this.execute(this.#pendingClose ? "issue_close" : "issue_claim", params, signal);
+    return this.execute(this.#pendingCheckout ? "checkout" : this.#pendingClose ? "issue_close" : "issue_claim", params, signal);
   }
 
   /** Cooperative preflight only: cannot sandbox OS access or cancel an already
@@ -183,6 +186,7 @@ export class Controller {
         this.#assertRunning();
         this.#checkExpiry();
         if (this.#pendingClose) throw new ForgeError("pending_close", "Stop editing; retry the original issue_close first");
+        if (this.#pendingCheckout) throw new ForgeError("pending_checkout", "Resolve the original checkout before editing");
         if (!this.#active) throw new ForgeError("lease_required", this.#reason);
         await this.#refresh(signal);
         if (this.#mode !== "live") throw new ForgeError("stop_editing", this.#reason);
@@ -207,7 +211,8 @@ export class Controller {
       } : null, liveLease: refreshed ? this.#leaseView : null })) +
         "\nForge collaboration control (not an OS sandbox): owner is long-term responsibility; live lease is exclusive execution authority. " +
         "Do not edit/write/bash/apply_patch without a confirmed exact lease. Additive issue_create/comment/link and reads remain allowed without a lease. " +
-        "issue_close requires truthful typed evidence; never invent tests, commits, or results. If pendingClose is true, retry the ORIGINAL issue_close unchanged even if the lease is now released.";
+        "issue_close requires truthful typed evidence; never invent tests, commits, or results. If pendingClose is true, retry the ORIGINAL issue_close unchanged even if the lease is now released. " +
+        "For isolation use checkout with ref, an absolute source, and dirty:true or commit. It uses the existing lease. Poll checkout_status until ready, then use its worktree as explicit cwd. If pendingCheckout is true, retry the ORIGINAL checkout unchanged. Close archives metadata and retains files; no automatic merge.";
     });
   }
 
@@ -223,6 +228,7 @@ export class Controller {
     this.#active = undefined;
     this.#pendingClaim = undefined;
     this.#pendingClose = undefined;
+    this.#pendingCheckout = undefined;
     this.#shutdown = (async () => {
       try {
         if (tenure) await this.#request("issue_release", { ref: tenure.issueUID, reason: `runtime_${reason}` }, {
@@ -451,6 +457,27 @@ export class Controller {
     if (this.#mode !== "stopped") { this.#mode = "idle"; this.#reason = "Execution finished/released; claim before editing"; }
   }
 
+  async #checkout(body:ObjectJSON,signal?:AbortSignal):Promise<ObjectJSON>{
+    if(this.#pendingClose||this.#pendingClaim) throw new ForgeError("execution_pending","Resolve the original claim or close before checkout");
+    if(this.#pendingCheckout){
+      const p=this.#pendingCheckout;
+      if((body.ref!==p.alias&&body.ref!==p.body.ref)||stable({...body,ref:p.body.ref})!==p.signature) throw new ForgeError("pending_checkout","Retry the ORIGINAL checkout unchanged");
+    }else{
+      const active=this.#requireActive(body.ref);
+      await this.#refresh(signal);
+      if(this.#mode!=="live"||this.#active!==active)throw new ForgeError("claim_lost","Checkout requires the current exact lease",409);
+      const snapshot={...body,ref:active.issueUID};
+      this.#pendingCheckout={body:snapshot,signature:stable(snapshot),alias:active.alias,token:active.token,key:randomUUID()};
+    }
+    const pending=this.#pendingCheckout;
+    try{
+      const reply=await this.#request("checkout",pending.body,{token:pending.token,key:pending.key,signal});
+      if(!requiredString(reply.body.workspace_id)||!requiredString(reply.body.state))throw new ForgeError("invalid_checkout","Ambiguous checkout response; retry the original request",0,true);
+      this.#pendingCheckout=undefined;
+      return this.sanitize(reply.body);
+    }catch(error){if(error instanceof ForgeError&&!error.ambiguous)this.#pendingCheckout=undefined;throw error;}
+  }
+
   async #request(name: ToolName, body: ObjectJSON, options: { token?: string; key?: string; signal?: AbortSignal; detached?: boolean; timeout?: number } = {}): Promise<{ body: ObjectJSON; started: number }> {
     const started = this.#clock.now();
     const mutation = mutationTools.has(name);
@@ -485,6 +512,7 @@ export class Controller {
         if (!response.ok) {
           const safeData = this.sanitize(data);
           const err = object(safeData.error);
+          if(name.startsWith('checkout') && err.code==='not_found')throw new ForgeError('checkout_unavailable','The daemon does not provide this checkout API',response.status,false,{hint:'Deploy matching CLI, extension and daemon versions; keep existing runtimes and workspaces until a planned restart.'});
           const ambiguous = err.ambiguous === true || responseAmbiguous(response.status);
           const details = {
             ...(requiredString(err.hint) ? { hint: err.hint } : {}),

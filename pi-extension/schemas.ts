@@ -17,6 +17,10 @@ const evidence = Type.Object({
 }, { additionalProperties: false });
 
 export const toolSchemas = {
+  checkout: Type.Object({ref,source:Type.Optional(text()),recover:Type.Optional(text()),dirty:Type.Optional(Type.Boolean()),commit:Type.Optional(text())},{additionalProperties:false}),
+  checkout_list: Type.Object({ref:Type.Optional(ref)},{additionalProperties:false}),
+  checkout_status: Type.Object({workspace_id:text()},{additionalProperties:false}),
+  checkout_archive: Type.Object({workspace_id:text()},{additionalProperties:false}),
   issue_list: Type.Object({ status: Type.Optional(StringEnum(["open", "closed"])), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })) }, { additionalProperties: false }),
   issue_get: Type.Object({ ref }, { additionalProperties: false }),
   issue_graph: Type.Object({ ref, depth: Type.Optional(Type.Integer({ minimum: 1, maximum: 10 })) }, { additionalProperties: false }),
@@ -49,5 +53,9 @@ export function validateParams(name: ToolName, params: unknown): asserts params 
         throw new ForgeError("usage", "Each typed evidence item must contain only type and its corresponding evidence field");
       }
     }
+  }
+  if (name === "checkout") {
+    const p=params as Record<string,unknown>;
+    if (Boolean(p.dirty)===Boolean(p.commit) || Boolean(p.source)===Boolean(p.recover)) throw new ForgeError("usage","Choose dirty or commit and exactly one source or recovery workspace");
   }
 }

@@ -117,7 +117,7 @@ func TestCheckoutOutsideRecordRootRequiresExplicitRecovery(t *testing.T) {
 	if r.State != "ready" {
 		t.Fatal(r.State, r.Error)
 	}
-	w := codexRequest(m, "tool", codexCommand{Identity: i, Operation: "checkout", Params: marshalCodex(map[string]any{"ref": uid, "source": r.Path, "dirty": true})}, codexTestToken)
+	w := codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "checkout", Params: runtimeJSON(map[string]any{"ref": uid, "source": r.Path, "dirty": true})}, codexTestToken)
 	if w.Code != 409 || !strings.Contains(w.Body.String(), "explicit_recovery_required") {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -129,7 +129,7 @@ func TestLegacyWorkspaceRecordsRemainReadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := workspaceRecord{ID: codexNonce(), Project: s.project, Issue: "01K00000000000000000000002", Tenure: strings.Repeat("a", 64), Repository: strings.Repeat("b", 64), State: "ready"}
+	r := workspaceRecord{ID: runtimeNonce(), Project: s.project, Issue: "01K00000000000000000000002", Tenure: strings.Repeat("a", 64), Repository: strings.Repeat("b", 64), State: "ready"}
 	r.Path = filepath.Join(s.root, "trees", r.Issue, r.Tenure, r.Repository, r.ID, "worktree")
 	if err = s.put(r); err != nil {
 		t.Fatal(err)

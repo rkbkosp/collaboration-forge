@@ -14,7 +14,7 @@ import (
 
 func TestWorkerCheckoutSharesLeaseAndReplaysArchive(t *testing.T) {
 	f := newToolsFixture(t)
-	m := newCodexRuntime(f.handler)
+	m := newSupervisedRuntime(f.handler)
 	var err error
 	m.workspaces, err = newWorkspaceStore(t.TempDir(), f.project.UID)
 	if err != nil {
@@ -25,7 +25,7 @@ func TestWorkerCheckoutSharesLeaseAndReplaysArchive(t *testing.T) {
 	f.handler.(*toolHandler).checkouts = m
 	uid, _ := toolsCreate(t, f.handler, "worker checkout")
 	token, _, claim := toolsClaim(t, f, uid, toolsRuntimeA, toolsAttemptA)
-	body := string(marshalCodex(map[string]any{"ref": uid, "source": checkoutRepo(t), "dirty": true}))
+	body := string(runtimeJSON(map[string]any{"ref": uid, "source": checkoutRepo(t), "dirty": true}))
 	if w := toolsRequest(f.handler, "checkout", toolsRuntimeA, "", body, "Idempotency-Key", toolsAttemptB); w.Code != 403 {
 		t.Fatal("missing proof accepted", w.Code)
 	}
@@ -80,7 +80,7 @@ func TestWorkerCheckoutSharesLeaseAndReplaysArchive(t *testing.T) {
 
 func TestWorkerCheckoutPersistenceFailureDoesNotDuplicateRequest(t *testing.T) {
 	f := newToolsFixture(t)
-	m := newCodexRuntime(f.handler)
+	m := newSupervisedRuntime(f.handler)
 	var err error
 	m.workspaces, err = newWorkspaceStore(t.TempDir(), f.project.UID)
 	if err != nil {
@@ -91,7 +91,7 @@ func TestWorkerCheckoutPersistenceFailureDoesNotDuplicateRequest(t *testing.T) {
 	f.handler.(*toolHandler).checkouts = m
 	uid, _ := toolsCreate(t, f.handler, "uncertain filesystem persistence")
 	token, _, _ := toolsClaim(t, f, uid, toolsRuntimeA, toolsAttemptA)
-	body := string(marshalCodex(map[string]any{"ref": uid, "source": checkoutRepo(t), "dirty": true}))
+	body := string(runtimeJSON(map[string]any{"ref": uid, "source": checkoutRepo(t), "dirty": true}))
 	write := m.workspaces.write
 	m.workspaces.write = func(r workspaceRecord) error {
 		if err := write(r); err != nil {
@@ -114,7 +114,7 @@ func TestWorkerCheckoutPersistenceFailureDoesNotDuplicateRequest(t *testing.T) {
 
 func TestWorkerCheckoutPreparationReleaseAndRestartFence(t *testing.T) {
 	f := newToolsFixture(t)
-	m := newCodexRuntime(f.handler)
+	m := newSupervisedRuntime(f.handler)
 	var err error
 	m.workspaces, err = newWorkspaceStore(t.TempDir(), f.project.UID)
 	if err != nil {
@@ -136,13 +136,13 @@ func TestWorkerCheckoutPreparationReleaseAndRestartFence(t *testing.T) {
 		}
 		return capture(ctx, o)
 	}
-	body := string(marshalCodex(map[string]any{"ref": uid, "source": checkoutRepo(t), "dirty": true}))
+	body := string(runtimeJSON(map[string]any{"ref": uid, "source": checkoutRepo(t), "dirty": true}))
 	w := toolsRequest(f.handler, "checkout", toolsRuntimeA, token, body, "Idempotency-Key", toolsAttemptB)
 	toolsSuccess(t, w)
 	var r workspaceRecord
 	json.Unmarshal(w.Body.Bytes(), &r)
 	<-started
-	changed := string(marshalCodex(map[string]any{"ref": uid, "source": "/different", "dirty": true}))
+	changed := string(runtimeJSON(map[string]any{"ref": uid, "source": "/different", "dirty": true}))
 	if w := toolsRequest(f.handler, "checkout", toolsRuntimeA, token, changed, "Idempotency-Key", toolsAttemptB); w.Code != 409 {
 		t.Fatal("request fingerprint not fenced", w.Code)
 	}
@@ -161,7 +161,7 @@ func TestWorkerCheckoutPreparationReleaseAndRestartFence(t *testing.T) {
 		t.Fatal("restored after lease loss", err)
 	}
 	m.workspaces.close()
-	n := newCodexRuntime(f.handler)
+	n := newSupervisedRuntime(f.handler)
 	n.workspaces, err = newWorkspaceStore(m.workspaces.root, f.project.UID)
 	if err != nil {
 		t.Fatal(err)

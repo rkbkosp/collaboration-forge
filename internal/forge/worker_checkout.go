@@ -9,7 +9,7 @@ import (
 
 // Bound memory independently of the number of issues ever closed. Serialize
 // create/close/release for a tenure even before its first artifact exists.
-func (m *codexRuntime) lockWorkerWorkspace(proof executionProof) func() {
+func (m *supervisedRuntime) lockWorkerWorkspace(proof executionProof) func() {
 	hash := sha256.Sum256([]byte(proof.ClaimUID))
 	gate := &m.workspaceGates[int(hash[0])%len(m.workspaceGates)]
 	gate.Lock()
@@ -18,12 +18,12 @@ func (m *codexRuntime) lockWorkerWorkspace(proof executionProof) func() {
 
 // The adapter uses an existing signed tenure. It never acquires, renews or
 // restores authority from a workspace record. CLI and Pi still own lifecycle.
-func (m *codexRuntime) workerThread(session string, proof executionProof) *codexThread {
-	id := codexIdentity{Instance: "worker", Session: session, Thread: workspaceTenure(proof.ClaimUID)}
+func (m *supervisedRuntime) workerThread(session string, proof executionProof) *supervisedActor {
+	id := actorIdentity{Instance: "worker", Session: session, Thread: workspaceTenure(proof.ClaimUID)}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.workers == nil {
-		m.workers = map[codexIdentity]*codexThread{}
+		m.workers = map[actorIdentity]*supervisedActor{}
 	}
 	if t := m.workers[id]; t != nil {
 		return t
@@ -31,16 +31,16 @@ func (m *codexRuntime) workerThread(session string, proof executionProof) *codex
 	if len(m.workers) >= 4096 {
 		return nil
 	}
-	t := &codexThread{identity: id, workerSession: session}
+	t := &supervisedActor{identity: id, workerSession: session}
 	m.workers[id] = t
 	return t
 }
 
-func (m *codexRuntime) hasWorkerWorkspaces(session string, proof executionProof) bool {
+func (m *supervisedRuntime) hasWorkerWorkspaces(session string, proof executionProof) bool {
 	if m.workspaces == nil {
 		return false
 	}
-	owner := codexIdentity{Instance: "worker", Session: session, Thread: workspaceTenure(proof.ClaimUID)}
+	owner := actorIdentity{Instance: "worker", Session: session, Thread: workspaceTenure(proof.ClaimUID)}
 	for _, r := range m.workspaces.list(proof.IssueUID) {
 		if r.Owner == owner {
 			return true
@@ -62,7 +62,7 @@ func (h *toolHandler) workerCheckout(w http.ResponseWriter, r *http.Request, ses
 	// Read/archive operations carry no authority; archive independently verifies
 	// that the authoritative issue is closed.
 	if op != "checkout" {
-		m.checkoutCommand(w, &codexThread{workerSession: session}, op, in)
+		m.checkoutCommand(w, &supervisedActor{workerSession: session}, op, in)
 		return
 	}
 	var params struct {
@@ -93,7 +93,7 @@ func (h *toolHandler) workerCheckout(w http.ResponseWriter, r *http.Request, ses
 	request := h.signer.digest("checkout-request-v1", session, proof.ClaimUID, key)
 	var canonical any
 	json.Unmarshal(in, &canonical)
-	fingerprint := workspaceTenure(string(marshalCodex(canonical)))
+	fingerprint := workspaceTenure(string(runtimeJSON(canonical)))
 	for _, record := range m.workspaces.list(proof.IssueUID) {
 		if record.Request != request {
 			continue
@@ -102,15 +102,15 @@ func (h *toolHandler) workerCheckout(w http.ResponseWriter, r *http.Request, ses
 			toolError(409, "request_id_conflict", "checkout request ID was reused with different parameters").serve(w)
 			return
 		}
-		codexReply(w, record)
+		runtimeReply(w, record)
 		return
 	}
-	t.active = &codexTenure{ref: proof.IssueUID, alias: proof.IssueUID, claim: proof.ClaimUID, token: r.Header.Get("X-Forge-Execution"), deadline: time.Now()}
+	t.active = &supervisedTenure{ref: proof.IssueUID, alias: proof.IssueUID, claim: proof.ClaimUID, token: r.Header.Get("X-Forge-Execution"), deadline: time.Now()}
 	t.workspaceRequest, t.workspaceFingerprint = request, fingerprint
 	m.checkoutCommand(w, t, op, in)
 }
 
-func (m *codexRuntime) workerCheckoutBusy(proof executionProof) bool {
+func (m *supervisedRuntime) workerCheckoutBusy(proof executionProof) bool {
 	if m.workspaces == nil {
 		return false
 	}
@@ -121,7 +121,7 @@ func (m *codexRuntime) workerCheckoutBusy(proof executionProof) bool {
 	}
 	return false
 }
-func (m *codexRuntime) retireWorkerWorkspaces(session string, proof executionProof) {
+func (m *supervisedRuntime) retireWorkerWorkspaces(session string, proof executionProof) {
 	t := m.workerThread(session, proof)
 	if t == nil {
 		return

@@ -27,7 +27,7 @@ type workspaceRecord struct {
 	Project       string        `json:"project_uid"`
 	Issue         string        `json:"issue_uid"`
 	Tenure        string        `json:"tenure"`
-	Owner         codexIdentity `json:"owner"`
+	Owner         actorIdentity `json:"owner"`
 	Repository    string        `json:"repository_id,omitempty"`
 	Source        string        `json:"source"`
 	Kind          string        `json:"source_kind"`
@@ -206,10 +206,11 @@ func (s *workspaceStore) list(issue string) []workspaceRecord {
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
-func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op string, raw json.RawMessage) {
+func (m *supervisedRuntime) checkoutCommand(w http.ResponseWriter, t *supervisedActor, op string, raw json.RawMessage) {
+	h := t.harness
 	s := m.workspaces
 	if s == nil {
-		codexFail(w, 503, "checkout_unavailable")
+		h.fail(w, 503, "checkout_unavailable")
 		return
 	}
 	var in struct {
@@ -223,24 +224,24 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&in) != nil {
-		codexFail(w, 400, "validation")
+		h.fail(w, 400, "validation")
 		return
 	}
 	if op == "checkout_list" {
 		if in.Ref != "" {
-			res := m.dispatch(t, "issue_get", marshalCodex(map[string]string{"ref": in.Ref}), "", "")
+			res := m.dispatch(t, "issue_get", runtimeJSON(map[string]string{"ref": in.Ref}), "", "")
 			var b struct {
 				Issue struct {
 					UID string `json:"uid"`
 				} `json:"issue"`
 			}
 			if res.Code != 200 || json.Unmarshal(res.Body.Bytes(), &b) != nil {
-				codexFail(w, 404, "issue_not_found")
+				h.fail(w, 404, "issue_not_found")
 				return
 			}
 			in.Ref = b.Issue.UID
 		}
-		codexReply(w, map[string]any{"workspaces": s.list(in.Ref)})
+		runtimeReply(w, map[string]any{"workspaces": s.list(in.Ref)})
 		return
 	}
 	if op == "checkout_status" || op == "checkout_archive" {
@@ -248,20 +249,20 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 		r, ok := s.records[in.ID]
 		s.mu.Unlock()
 		if !ok {
-			codexFail(w, 404, "workspace_not_found")
+			h.fail(w, 404, "workspace_not_found")
 			return
 		}
 		if op == "checkout_archive" {
 			if r.State == "preparing" {
-				codexFail(w, 409, "checkout_busy")
+				h.fail(w, 409, "checkout_busy")
 				return
 			}
-			res := m.dispatch(t, "issue_get", marshalCodex(map[string]string{"ref": r.Issue}), "", "")
+			res := m.dispatch(t, "issue_get", runtimeJSON(map[string]string{"ref": r.Issue}), "", "")
 			var b struct {
 				Issue struct{ UID, Status string } `json:"issue"`
 			}
 			if res.Code != 200 || json.Unmarshal(res.Body.Bytes(), &b) != nil || b.Issue.UID != r.Issue || b.Issue.Status != "closed" {
-				codexFail(w, 409, "archive_requires_closed_issue")
+				h.fail(w, 409, "archive_requires_closed_issue")
 				return
 			}
 			s.mu.Lock()
@@ -276,28 +277,28 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 			}
 			s.mu.Unlock()
 			if e != nil {
-				codexFail(w, 503, "workspace_archive_failed")
+				h.fail(w, 503, "workspace_archive_failed")
 				return
 			}
 		}
-		codexReply(w, r)
+		runtimeReply(w, r)
 		return
 	}
 	if op != "checkout" {
-		codexFail(w, 404, "unknown_operation")
+		h.fail(w, 404, "unknown_operation")
 		return
 	}
 	if !toolRef(in.Ref) || in.Dirty == (in.Commit != "") || (in.Recover != "" && in.Source != "") {
-		codexFail(w, 400, "choose_checkout_source")
+		h.fail(w, 400, "choose_checkout_source")
 		return
 	}
 	if t.pending != nil {
-		codexFail(w, 409, "execution_pending")
+		h.fail(w, 409, "execution_pending")
 		return
 	}
-	m.refreshCodex(t)
+	m.refreshActor(t)
 	if t.active == nil || t.unknown || t.paused || (in.Ref != t.active.ref && in.Ref != t.active.alias) {
-		codexFail(w, 409, "checkout_requires_current_lease")
+		h.fail(w, 409, "checkout_requires_current_lease")
 		return
 	}
 	source := in.Source
@@ -306,18 +307,18 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 		old, ok := s.records[in.Recover]
 		s.mu.Unlock()
 		if !ok || old.Issue != t.active.ref || old.Path == "" || old.State == "preparing" {
-			codexFail(w, 409, "invalid_recovery_workspace")
+			h.fail(w, 409, "invalid_recovery_workspace")
 			return
 		}
 		source = old.Path
 	}
 	if !filepath.IsAbs(source) {
-		codexFail(w, 400, "source_must_be_absolute")
+		h.fail(w, 400, "source_must_be_absolute")
 		return
 	}
 	source, e := filepath.EvalSymlinks(source)
 	if e != nil {
-		codexFail(w, 400, "source_unavailable")
+		h.fail(w, 400, "source_unavailable")
 		return
 	}
 	managed := strings.HasPrefix(source, s.root+string(os.PathSeparator))
@@ -327,27 +328,27 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 		}
 	}
 	if in.Recover == "" && managed {
-		codexFail(w, 409, "explicit_recovery_required")
+		h.fail(w, 409, "explicit_recovery_required")
 		return
 	}
 	s.mu.Lock()
 	if s.stopped || len(s.records) >= 4096 {
 		s.mu.Unlock()
-		codexFail(w, 429, "workspace_limit")
+		h.fail(w, 429, "workspace_limit")
 		return
 	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
 		s.mu.Unlock()
-		codexFail(w, 429, "checkout_busy")
+		h.fail(w, 429, "checkout_busy")
 		return
 	}
 	kind := "commit"
 	if in.Dirty {
 		kind = "dirty"
 	}
-	r := workspaceRecord{ID: codexNonce(), Project: s.project, Issue: t.active.ref, Tenure: workspaceTenure(t.active.claim), Owner: t.identity, Source: source, Kind: kind, State: "preparing", RecoveredFrom: in.Recover}
+	r := workspaceRecord{ID: runtimeNonce(), Project: s.project, Issue: t.active.ref, Tenure: workspaceTenure(t.active.claim), Owner: t.identity, Source: source, Kind: kind, State: "preparing", RecoveredFrom: in.Recover}
 	r.Request, r.Fingerprint = t.workspaceRequest, t.workspaceFingerprint
 	if e = s.put(r); e != nil {
 		// A rename may have committed before directory fsync failed. Preserve
@@ -356,16 +357,16 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 		s.records[r.ID] = r
 		<-s.slots
 		s.mu.Unlock()
-		codexFail(w, 503, "workspace_store_failed")
+		h.fail(w, 503, "workspace_store_failed")
 		return
 	}
 	s.wg.Add(1)
 	s.mu.Unlock()
 	claim := t.active.claim
 	go m.prepareWorkspace(t, claim, r, in.Commit, in.Dirty)
-	codexReply(w, r)
+	runtimeReply(w, r)
 }
-func (m *codexRuntime) prepareWorkspace(t *codexThread, claim string, r workspaceRecord, commit string, dirty bool) {
+func (m *supervisedRuntime) prepareWorkspace(t *supervisedActor, claim string, r workspaceRecord, commit string, dirty bool) {
 	s := m.workspaces
 	defer s.wg.Done()
 	defer func() { <-s.slots }()
@@ -435,29 +436,29 @@ func (m *codexRuntime) prepareWorkspace(t *codexThread, claim string, r workspac
 		m.workspaceFailed(r, "workspace_store_failed")
 	}
 }
-func (m *codexRuntime) workspaceLive(t *codexThread, claim string) bool {
+func (m *supervisedRuntime) workspaceLive(t *supervisedActor, claim string) bool {
 	if t.workerSession != "" {
-		m.refreshCodex(t)
+		m.refreshActor(t)
 		return t.active != nil && !t.unknown && t.active.claim == claim
 	}
 	m.mu.Lock()
-	stopped := t.retired || t.instance.retired || m.ended[codexSessionKey{t.identity.Instance, t.identity.Session}] || !m.alive(t.instance.pid, t.instance.birth)
+	stopped := t.retired || t.instance.retired || m.ended[actorSessionKey{t.identity.Instance, t.identity.Session}] || !m.alive(t.instance.pid, t.instance.birth)
 	m.mu.Unlock()
 	if stopped || t.paused || t.pending != nil {
 		return false
 	}
-	m.refreshCodex(t)
+	m.refreshActor(t)
 	return t.active != nil && !t.unknown && t.active.claim == claim
 }
-func (m *codexRuntime) observeWorkspace(t *codexThread, r workspaceRecord, state string) error {
+func (m *supervisedRuntime) observeWorkspace(t *supervisedActor, r workspaceRecord, state string) error {
 	in := workspaceInput{Ref: r.Issue, SnapshotID: r.Snapshot, BaseCommit: r.Base, RepositoryID: r.Repository, WorkspaceID: r.ID, State: state, SourceKind: r.Kind, Device: "local", Location: r.Path, SnapshotLocation: r.SnapshotPath}
-	res := m.dispatch(t, "issue_workspace", marshalCodex(in), t.active.token, "")
+	res := m.dispatch(t, "issue_workspace", runtimeJSON(in), t.active.token, "")
 	if res.Code != 200 && res.Code != 201 {
 		return errors.New("workspace observation failed")
 	}
 	return nil
 }
-func (m *codexRuntime) workspaceFailed(r workspaceRecord, code string) {
+func (m *supervisedRuntime) workspaceFailed(r workspaceRecord, code string) {
 	r.State = "failed"
 	if code == "lease_lost" || m.workspaces.ctx.Err() != nil {
 		r.State = "orphaned"
@@ -468,7 +469,7 @@ func (m *codexRuntime) workspaceFailed(r workspaceRecord, code string) {
 	defer s.mu.Unlock()
 	s.put(r)
 }
-func (m *codexRuntime) checkoutBusy(t *codexThread) bool {
+func (m *supervisedRuntime) checkoutBusy(t *supervisedActor) bool {
 	if m.workspaces == nil || t.active == nil {
 		return false
 	}
@@ -479,7 +480,7 @@ func (m *codexRuntime) checkoutBusy(t *codexThread) bool {
 	}
 	return false
 }
-func (m *codexRuntime) archiveWorkspaces(t *codexThread, claim string) map[string]any {
+func (m *supervisedRuntime) archiveWorkspaces(t *supervisedActor, claim string) map[string]any {
 	result := map[string]any{"state": "archived", "workspaces": []string{}}
 	if m.workspaces == nil || claim == "" {
 		return result
@@ -505,7 +506,7 @@ func (m *codexRuntime) archiveWorkspaces(t *codexThread, claim string) map[strin
 	result["workspaces"] = ids
 	return result
 }
-func (m *codexRuntime) markWorkspaces(t *codexThread, state string) {
+func (m *supervisedRuntime) markWorkspaces(t *supervisedActor, state string) {
 	if m.workspaces == nil {
 		return
 	}
@@ -526,7 +527,7 @@ func (m *codexRuntime) markWorkspaces(t *codexThread, state string) {
 	}
 }
 
-func (m *codexRuntime) threadWorkspaces(t *codexThread) []workspaceRecord {
+func (m *supervisedRuntime) threadWorkspaces(t *supervisedActor) []workspaceRecord {
 	out := []workspaceRecord{}
 	if m.workspaces == nil {
 		return out

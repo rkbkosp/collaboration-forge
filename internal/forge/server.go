@@ -52,7 +52,7 @@ type Server struct {
 	config    Config
 	handler   http.Handler
 	tools     http.Handler
-	codex     *codexRuntime
+	runtime   *supervisedRuntime
 	signer    executionSigner
 	lock      *os.File
 	cancel    context.CancelFunc
@@ -157,25 +157,25 @@ func New(cfg Config) (_ *Server, err error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{service: svc, project: result.Project, config: cfg, signer: signer, lock: lock, cancel: cancel, runDone: make(chan struct{})}
 	s.tools = newToolHandler(svc.Handler(), result.Project, signer)
-	s.codex = newCodexRuntime(s.tools)
-	s.tools.(*toolHandler).checkouts = s.codex
+	s.runtime = newSupervisedRuntime(s.tools)
+	s.tools.(*toolHandler).checkouts = s.runtime
 	workspaceRoot := cfg.WorkspaceRoot
 	if workspaceRoot == "" {
 		workspaceRoot = filepath.Join(dir, "workspaces")
 	}
-	s.codex.workspaces, err = newWorkspaceStore(filepath.Join(workspaceRoot, result.Project.UID), result.Project.UID)
+	s.runtime.workspaces, err = newWorkspaceStore(filepath.Join(workspaceRoot, result.Project.UID), result.Project.UID)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	s.codex.workspaces.worktreeRoot = cfg.Project.WorktreeRoot
+	s.runtime.workspaces.worktreeRoot = cfg.Project.WorktreeRoot
 	s.handler = s.authenticatedHandler()
 	go func() {
-		codexDone := make(chan struct{})
-		go func() { s.codex.run(ctx); close(codexDone) }()
+		runtimeDone := make(chan struct{})
+		go func() { s.runtime.run(ctx); close(runtimeDone) }()
 		s.runErr = svc.Run(ctx)
 		cancel()
-		<-codexDone
+		<-runtimeDone
 		close(s.runDone)
 	}()
 	return s, nil
@@ -198,7 +198,7 @@ func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
 		runErr := s.Wait()
-		s.codex.workspaces.close()
+		s.runtime.workspaces.close()
 		s.closeErr = errors.Join(runErr, s.service.Close(), unlock(s.lock))
 	})
 	return s.closeErr
@@ -231,8 +231,10 @@ func (s *Server) authenticatedHandler() http.Handler {
 			_ = json.NewEncoder(w).Encode(map[string]any{"project": map[string]any{"id": s.project.ID, "uid": s.project.UID, "name": s.project.Name}, "close_protocol": "close-v2"})
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/forge/v1/codex/") && s.codex != nil {
-			s.codex.ServeHTTP(w, r)
+		// Every harness shares one ephemeral runtime; the path selects only the
+		// private control namespace and its instance-capability header.
+		if profile, _ := harnessForPath(r.URL.Path); profile.Name != "" && strings.HasPrefix(r.URL.Path, profile.Prefix) && s.runtime != nil {
+			s.runtime.ServeHTTP(w, r)
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/forge/v1/tools/") && s.tools != nil {

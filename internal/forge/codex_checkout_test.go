@@ -35,10 +35,10 @@ func checkoutRepo(t *testing.T) string {
 	}
 	return d
 }
-func waitCheckout(t *testing.T, m *codexRuntime, i codexIdentity, id string) workspaceRecord {
+func waitCheckout(t *testing.T, m *supervisedRuntime, i actorIdentity, id string) workspaceRecord {
 	t.Helper()
 	for n := 0; n < 300; n++ {
-		w := codexRequest(m, "tool", codexCommand{Identity: i, Operation: "checkout_status", Params: marshalCodex(map[string]string{"workspace_id": id})}, codexTestToken)
+		w := codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "checkout_status", Params: runtimeJSON(map[string]string{"workspace_id": id})}, codexTestToken)
 		if w.Code != 200 {
 			t.Fatal(w.Code, w.Body.String())
 		}
@@ -54,7 +54,7 @@ func waitCheckout(t *testing.T, m *codexRuntime, i codexIdentity, id string) wor
 }
 func TestCheckoutRequiresExistingTenureAndArchivesWithoutRemovingFiles(t *testing.T) {
 	f := newToolsFixture(t)
-	m := newCodexRuntime(f.handler)
+	m := newSupervisedRuntime(f.handler)
 	var e error
 	m.workspaces, e = newWorkspaceStore(t.TempDir(), f.project.UID)
 	if e != nil {
@@ -63,15 +63,15 @@ func TestCheckoutRequiresExistingTenureAndArchivesWithoutRemovingFiles(t *testin
 	m.workspaces.worktreeRoot = filepath.Join(m.workspaces.root, "trees")
 	t.Cleanup(m.workspaces.close)
 	codexRequest(m, "register", map[string]any{"instance_id": "checkout", "pid": os.Getpid()}, codexTestToken)
-	i := codexIdentity{"checkout", "session", "thread"}
+	i := actorIdentity{Instance: "checkout", Session: "session", Thread: "thread"}
 	uid, _ := toolsCreate(t, f.handler, "checkout fixture")
 	source := checkoutRepo(t)
-	params := marshalCodex(map[string]any{"ref": uid, "source": source, "dirty": true})
-	cmd := codexCommand{Identity: i, Operation: "checkout", Params: params, RequestID: "checkout-request"}
+	params := runtimeJSON(map[string]any{"ref": uid, "source": source, "dirty": true})
+	cmd := supervisedCommand{Identity: i, Operation: "checkout", Params: params, RequestID: "checkout-request"}
 	if w := codexRequest(m, "tool", cmd, codexTestToken); w.Code != 409 {
 		t.Fatal("unclaimed checkout allowed", w.Code)
 	}
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_claim", Params: marshalCodex(map[string]string{"ref": uid})}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "issue_claim", Params: runtimeJSON(map[string]string{"ref": uid})}, codexTestToken))
 	claim := m.threads[i].active.claim
 	cmd.RequestID = "claimed-checkout"
 	w := codexRequest(m, "tool", cmd, codexTestToken)
@@ -92,7 +92,7 @@ func TestCheckoutRequiresExistingTenureAndArchivesWithoutRemovingFiles(t *testin
 		t.Fatal("request replay duplicated checkout")
 	}
 	close := map[string]any{"ref": uid, "reason": "audit-no-change", "message": "Generated checkout fixture verified; no product change is needed for this audit.", "evidence": []any{map[string]string{"type": "no-change-audit", "rationale": "Generated test fixture validates checkout and archive behavior."}}}
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_close", Params: marshalCodex(close)}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "issue_close", Params: runtimeJSON(close)}, codexTestToken))
 	archived := waitCheckout(t, m, i, start.ID)
 	if archived.State != "archived" {
 		t.Fatal("not archived", archived)
@@ -102,10 +102,10 @@ func TestCheckoutRequiresExistingTenureAndArchivesWithoutRemovingFiles(t *testin
 	}
 }
 
-func checkoutFixture(t *testing.T) (*codexRuntime, codexIdentity, string, string) {
+func checkoutFixture(t *testing.T) (*supervisedRuntime, actorIdentity, string, string) {
 	t.Helper()
 	f := newToolsFixture(t)
-	m := newCodexRuntime(f.handler)
+	m := newSupervisedRuntime(f.handler)
 	var e error
 	m.workspaces, e = newWorkspaceStore(t.TempDir(), f.project.UID)
 	if e != nil {
@@ -113,32 +113,32 @@ func checkoutFixture(t *testing.T) (*codexRuntime, codexIdentity, string, string
 	}
 	m.workspaces.worktreeRoot = filepath.Join(m.workspaces.root, "trees")
 	t.Cleanup(m.workspaces.close)
-	i := codexIdentity{"workspace-instance", "session", "thread"}
+	i := actorIdentity{Instance: "workspace-instance", Session: "session", Thread: "thread"}
 	toolsSuccess(t, codexRequest(m, "register", map[string]any{"instance_id": i.Instance, "pid": os.Getpid()}, codexTestToken))
 	uid, _ := toolsCreate(t, f.handler, "isolated checkout tests")
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_claim", Params: marshalCodex(map[string]string{"ref": uid})}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "issue_claim", Params: runtimeJSON(map[string]string{"ref": uid})}, codexTestToken))
 	return m, i, uid, checkoutRepo(t)
 }
-func beginCheckout(t *testing.T, m *codexRuntime, i codexIdentity, p map[string]any) workspaceRecord {
+func beginCheckout(t *testing.T, m *supervisedRuntime, i actorIdentity, p map[string]any) workspaceRecord {
 	t.Helper()
-	w := codexRequest(m, "tool", codexCommand{Identity: i, Operation: "checkout", Params: marshalCodex(p)}, codexTestToken)
+	w := codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "checkout", Params: runtimeJSON(p)}, codexTestToken)
 	toolsSuccess(t, w)
 	var r workspaceRecord
 	json.Unmarshal(w.Body.Bytes(), &r)
 	return r
 }
-func closeCheckout(t *testing.T, m *codexRuntime, i codexIdentity, uid string) *httptest.ResponseRecorder {
+func closeCheckout(t *testing.T, m *supervisedRuntime, i actorIdentity, uid string) *httptest.ResponseRecorder {
 	t.Helper()
-	return codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_close", Params: marshalCodex(map[string]any{"ref": uid, "reason": "audit-no-change", "message": "Generated checkout fixture was verified and requires no product code change.", "evidence": []any{map[string]string{"type": "no-change-audit", "rationale": "This generated fixture validates workspace lifecycle behavior only."}}})}, codexTestToken)
+	return codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "issue_close", Params: runtimeJSON(map[string]any{"ref": uid, "reason": "audit-no-change", "message": "Generated checkout fixture was verified and requires no product code change.", "evidence": []any{map[string]string{"type": "no-change-audit", "rationale": "This generated fixture validates workspace lifecycle behavior only."}}})}, codexTestToken)
 }
-func TestCheckoutMultipleRepositoriesSourceModesAndThreadFence(t *testing.T) {
+func TestCheckoutMultipleRepositoriesSourceModesAndActorFence(t *testing.T) {
 	m, i, uid, source := checkoutFixture(t)
 	second := checkoutRepo(t)
 	os.WriteFile(filepath.Join(source, "file.txt"), []byte("working\n"), 0600)
 	os.WriteFile(filepath.Join(source, "new.txt"), []byte("untracked\n"), 0600)
 	other := i
 	other.Thread = "other"
-	w := codexRequest(m, "tool", codexCommand{Identity: other, Operation: "checkout", Params: marshalCodex(map[string]any{"ref": uid, "source": source, "dirty": true})}, codexTestToken)
+	w := codexRequest(m, "tool", supervisedCommand{Identity: other, Operation: "checkout", Params: runtimeJSON(map[string]any{"ref": uid, "source": source, "dirty": true})}, codexTestToken)
 	if w.Code != 409 {
 		t.Fatal("other thread reused authority", w.Code)
 	}
@@ -177,18 +177,18 @@ func TestCheckoutReleaseRecoveryRequiresFreshClaimAndPreservesOldTree(t *testing
 	r := beginCheckout(t, m, i, map[string]any{"ref": uid, "source": source, "dirty": true})
 	r = waitCheckout(t, m, i, r.ID)
 	os.WriteFile(filepath.Join(r.Path, "progress.txt"), []byte("retained progress"), 0600)
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_release", Params: marshalCodex(map[string]string{"ref": uid})}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "issue_release", Params: runtimeJSON(map[string]string{"ref": uid})}, codexTestToken))
 	if waitCheckout(t, m, i, r.ID).State != "orphaned" {
 		t.Fatal("release should retain an orphan")
 	}
-	j := codexIdentity{"fresh-instance", "session", "thread"}
+	j := actorIdentity{Instance: "fresh-instance", Session: "session", Thread: "thread"}
 	codexRequest(m, "register", map[string]any{"instance_id": j.Instance, "pid": os.Getpid()}, codexTestToken)
-	params := marshalCodex(map[string]any{"ref": uid, "recover": r.ID, "dirty": true})
-	w := codexRequest(m, "tool", codexCommand{Identity: j, Operation: "checkout", Params: params}, codexTestToken)
+	params := runtimeJSON(map[string]any{"ref": uid, "recover": r.ID, "dirty": true})
+	w := codexRequest(m, "tool", supervisedCommand{Identity: j, Operation: "checkout", Params: params}, codexTestToken)
 	if w.Code != 409 {
 		t.Fatal("recovery restored old authority")
 	}
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: j, Operation: "issue_claim", Params: marshalCodex(map[string]string{"ref": uid})}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: j, Operation: "issue_claim", Params: runtimeJSON(map[string]string{"ref": uid})}, codexTestToken))
 	fresh := beginCheckout(t, m, j, map[string]any{"ref": uid, "recover": r.ID, "dirty": true})
 	fresh = waitCheckout(t, m, j, fresh.ID)
 	if fresh.State != "ready" || fresh.Path == r.Path || fresh.Tenure == r.Tenure || fresh.RecoveredFrom != r.ID {
@@ -221,7 +221,7 @@ func TestCheckoutArchiveFailureCannotInvalidateCommittedClose(t *testing.T) {
 	s.mu.Lock()
 	s.write = write
 	s.mu.Unlock()
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "checkout_archive", Params: marshalCodex(map[string]string{"workspace_id": r.ID})}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "checkout_archive", Params: runtimeJSON(map[string]string{"workspace_id": r.ID})}, codexTestToken))
 	if waitCheckout(t, m, i, r.ID).State != "archived" {
 		t.Fatal("archive retry failed")
 	}
@@ -265,7 +265,7 @@ func TestCheckoutDoesNotBlockRenewalAndRejectsLostLeaseBeforeRestore(t *testing.
 	if w := closeCheckout(t, m, i, uid); w.Code != 409 {
 		t.Fatal("closed while checkout was preparing", w.Code)
 	}
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "issue_release", Params: marshalCodex(map[string]string{"ref": uid})}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "issue_release", Params: runtimeJSON(map[string]string{"ref": uid})}, codexTestToken))
 	close(unblock)
 	r = waitCheckout(t, m, i, r.ID)
 	if r.State != "orphaned" {
@@ -289,9 +289,9 @@ func TestCheckoutRestartRetainsArtifactsButOrphansRuntimeState(t *testing.T) {
 	if len(rows) != 1 || rows[0].State != "orphaned" || rows[0].Path != r.Path {
 		t.Fatal(rows)
 	}
-	n := newCodexRuntime(m.tools)
+	n := newSupervisedRuntime(m.tools)
 	n.workspaces = fresh
-	if w := codexRequest(n, "tool", codexCommand{Identity: i, Operation: "checkout_status", Params: marshalCodex(map[string]string{"workspace_id": r.ID})}, codexTestToken); w.Code != 403 {
+	if w := codexRequest(n, "tool", supervisedCommand{Identity: i, Operation: "checkout_status", Params: runtimeJSON(map[string]string{"workspace_id": r.ID})}, codexTestToken); w.Code != 403 {
 		t.Fatal("restart restored runtime", w.Code)
 	}
 }
@@ -318,8 +318,8 @@ func TestCheckoutUncertainCloseArchivesAfterLeaseExpiry(t *testing.T) {
 		t.Fatal("response loss not injected", w.Code)
 	}
 	m.threads[i].active.deadline = time.Now().Add(-time.Second)
-	toolsSuccess(t, codexRequest(m, "event", codexEvent{Identity: i, Event: "stop_check"}, codexTestToken))
-	toolsSuccess(t, codexRequest(m, "tool", codexCommand{Identity: i, Operation: "retry"}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "event", supervisedEvent{Identity: i, Event: "stop_check"}, codexTestToken))
+	toolsSuccess(t, codexRequest(m, "tool", supervisedCommand{Identity: i, Operation: "retry"}, codexTestToken))
 	if got := waitCheckout(t, m, i, r.ID); got.State != "archived" {
 		t.Fatal("receipt recovery missed archive", got)
 	}

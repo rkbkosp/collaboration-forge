@@ -22,7 +22,7 @@ const (
 )
 
 type toolHandler struct {
-	checkouts *codexRuntime
+	checkouts *supervisedRuntime
 	handler   http.Handler
 	project   kata.Project
 	signer    executionSigner
@@ -51,12 +51,12 @@ func (h *toolHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A distinct execution Subject controls the lease. The display actor stays
-	// session-stable so comments and execution events correlate. Pi must never
-	// restore an old attempt into a new runtime, even for the same session.
+	// session-stable so comments and execution events correlate. A harness must
+	// never restore an old attempt into a new runtime, even for the same session.
 	session := h.signer.session(runtime)
 	principal := kata.Principal{Subject: "session:" + session, Actor: "Agent/" + session[:12]}
-	if _, ok := r.Context().Value(codexAttributionKey{}).(codexIdentity); ok {
-		principal.Actor = "Codex/" + session[:12]
+	if attribution, ok := r.Context().Value(actorAttributionKey{}).(actorAttribution); ok {
+		principal.Actor = attribution.harness.label() + "/" + session[:12]
 	}
 	h.invoke(w, r, strings.TrimPrefix(r.URL.Path, prefix), runtime, principal)
 }
@@ -177,8 +177,8 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 		// server-derived link to the same actor shown on comments and close,
 		// without exposing the private logical-acquire nonce or token.
 		purpose := principal.Actor + " [Pi session " + runtime + "]"
-		if id, ok := r.Context().Value(codexAttributionKey{}).(codexIdentity); ok {
-			purpose = principal.Actor + " [Codex session " + id.Session + ", thread " + id.Thread + ", instance " + id.Instance + "]"
+		if attribution, ok := r.Context().Value(actorAttributionKey{}).(actorAttribution); ok {
+			purpose = principal.Actor + " [" + attribution.harness.label() + " session " + attribution.identity.Session + ", thread " + attribution.identity.slot() + ", instance " + attribution.identity.Instance + "]"
 		}
 		if in.Purpose != "" {
 			purpose += ": " + in.Purpose
@@ -304,7 +304,7 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 		// STRICT CLOSE: no show/status/live-lease preflight. Kata's atomic
 		// close-v2 guard checks exact ClaimUID + complete host principal and
 		// releases the lease. K7 must replay receipts BEFORE live validation.
-		var workspaceThread *codexThread
+		var workspaceThread *supervisedActor
 		if h.checkouts != nil {
 			unlock := h.checkouts.lockWorkerWorkspace(proof)
 			defer unlock()

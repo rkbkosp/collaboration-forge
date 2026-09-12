@@ -67,7 +67,8 @@ old execution. Each thread has its own current execution and pending request.
 | Event | Behavior |
 | --- | --- |
 | SessionStart / SubagentStart | Register thread and inject short protocol |
-| SessionStart compact / PostCompact | Refresh context; keep current pending request and tenure |
+| SessionStart compact | Refresh state and inject context; keep current pending request and tenure |
+| PostCompact | Refresh server state and return `{}`; no context injection; keep current pending request and tenure |
 | Pre/PostToolUse | Liveness only, no shell-command business classifier |
 | UserPromptSubmit | Touch and resume paused renewal if the lease is still live |
 | Interrupt | Pause renewal; no force release |

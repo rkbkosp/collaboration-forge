@@ -12,7 +12,9 @@ export async function handleHook(input:any,env:NodeJS.ProcessEnv=process.env,rpc
  const events:Record<string,string>={SessionStart:input.source==='compact'?'context':'start',SubagentStart:'start',PostCompact:'context',PreCompact:'touch',PreToolUse:'touch',PostToolUse:'touch',UserPromptSubmit:'prompt',SessionEnd:'session_end',Interrupt:'interrupt',Stop:'stop_check',SubagentStop:'stop_check'};
  if(!Object.hasOwn(events,name))throw new CodexError('unsupported_hook');
  const state=await rpc('event',{identity,event:events[name]},env,name==='SessionEnd'||name==='Interrupt'?650:2500);
- if(name==='SessionStart'||name==='SubagentStart'||name==='PostCompact')return {hookSpecificOutput:{hookEventName:name,additionalContext:PROTOCOL+'\n'+JSON.stringify(state)}};
+ // PostCompact only supports common output fields; its state refresh above
+ // remains useful, but it cannot inject additionalContext.
+ if(name==='SessionStart'||name==='SubagentStart')return {hookSpecificOutput:{hookEventName:name,additionalContext:PROTOCOL+'\n'+JSON.stringify(state)}};
  if(name==='Stop'||name==='SubagentStop'){
   const policy=env.FORGE_CODEX_STOP_POLICY??'strict';
   if(policy!=='strict'&&policy!=='advisory')throw new CodexError('invalid_stop_policy');

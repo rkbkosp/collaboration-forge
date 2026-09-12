@@ -5,6 +5,10 @@ context, `forged` owns ephemeral execution state/renewal, and embedded Kata owns
 issues, leases, comments, links, events and typed evidence. No MCP or Codex fork.
 The hook contract is verified against Codex CLI **0.154.0**.
 
+This adapter preserves the shared protocol invariants documented in the
+[harness adapter contract](harness-adapters.md); that contract is normative for
+every harness.
+
 ## Setup
 
 Build/start forged as in README and install/link the local CLI package. Configure

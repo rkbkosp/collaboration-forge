@@ -120,6 +120,10 @@ session/subagent context, compaction recovery, bounded Stop checks and cleanup.
 See [Codex setup, lifecycle and retry semantics](docs/codex.md) and
 [optional claimed-Issue worktrees](docs/codex-checkout.md).
 
+`forge pi`, `forge codex` and `forge claude` are equal top-level harness
+entrypoints that share one Issue/lease/evidence authority; see the
+[harness adapter contract](docs/harness-adapters.md).
+
 ## Pi extension
 
 Use Pi 0.85.1 and Node >=22.19:

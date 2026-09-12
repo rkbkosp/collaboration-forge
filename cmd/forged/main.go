@@ -52,7 +52,9 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	flags := flag.NewFlagSet("forged serve", flag.ContinueOnError)
 	flags.SetOutput(output)
 	dir := flags.String("data-dir", ".forge", "private data directory")
-	workspaceRoot := flags.String("workspace-root", "", "managed checkout root outside source repositories (default: DATA_DIR/workspaces)")
+	workspaceRoot := flags.String("workspace-root", "", "legacy workspace record root (default: DATA_DIR/workspaces)")
+	configFile := flags.String("config", "", "host configuration TOML with project.worktree_root")
+	worktreeRoot := flags.String("worktree-root", "", "override project.worktree_root (default: source volume, then Application Support)")
 	project := flags.String("project", "forge", "stable project name (must match on restart)")
 	listen := flags.String("listen", "127.0.0.1:7347", "loopback IP literal and port")
 	tokenFile := flags.String("admin-token-file", "", "0600 supervisor token file (default: DATA_DIR/admin-token, generated if absent)")
@@ -69,6 +71,10 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if err := validateListen(*listen); err != nil {
 		return err
 	}
+	projectConfig, err := loadProjectConfig(*configFile, *worktreeRoot)
+	if err != nil {
+		return err
+	}
 	token, err := loadAdminToken(*dir, *tokenFile)
 	if err != nil {
 		return err
@@ -77,7 +83,7 @@ func run(ctx context.Context, args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	svc, err := forge.New(forge.Config{WorkspaceRoot: *workspaceRoot, DataDir: *dir, ProjectName: *project, AdminToken: token, WorkerToken: workerToken})
+	svc, err := forge.New(forge.Config{Project: projectConfig, WorkspaceRoot: *workspaceRoot, DataDir: *dir, ProjectName: *project, AdminToken: token, WorkerToken: workerToken})
 	if err != nil {
 		return err
 	}

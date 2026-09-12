@@ -35,6 +35,7 @@ type workspaceRecord struct {
 	Snapshot      string        `json:"snapshot_id,omitempty"`
 	SnapshotPath  string        `json:"snapshot_path,omitempty"`
 	Path          string        `json:"worktree,omitempty"`
+	WorktreeRoot  string        `json:"worktree_root,omitempty"`
 	State         string        `json:"state"`
 	Error         string        `json:"error_code,omitempty"`
 	Updated       time.Time     `json:"updated_at"`
@@ -48,6 +49,7 @@ type workspaceStore struct {
 	capture       func(context.Context, checkout.Options) (checkout.Snapshot, error)
 	mu            sync.Mutex
 	root, project string
+	worktreeRoot  string
 	records       map[string]workspaceRecord
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -141,7 +143,15 @@ func newWorkspaceStore(root, project string) (_ *workspaceStore, err error) {
 			cancel()
 			return nil, errors.New("invalid workspace record")
 		}
-		if r.Path != "" && (!isHex(r.Repository, 32) || r.Path != filepath.Join(root, "trees", r.Issue, r.Tenure, r.Repository, r.ID, "worktree")) {
+		expected := filepath.Join(root, "trees", r.Issue, r.Tenure, r.Repository, r.ID, "worktree")
+		if r.WorktreeRoot != "" {
+			if !filepath.IsAbs(r.WorktreeRoot) || filepath.Clean(r.WorktreeRoot) != r.WorktreeRoot {
+				cancel()
+				return nil, errors.New("invalid worktree root")
+			}
+			expected = filepath.Join(r.WorktreeRoot, r.ID, "worktree")
+		}
+		if r.Path != "" && (!isHex(r.Repository, 32) || r.Path != expected) {
 			cancel()
 			return nil, errors.New("invalid workspace path")
 		}
@@ -310,7 +320,13 @@ func (m *codexRuntime) checkoutCommand(w http.ResponseWriter, t *codexThread, op
 		codexFail(w, 400, "source_unavailable")
 		return
 	}
-	if in.Recover == "" && strings.HasPrefix(source, s.root+string(os.PathSeparator)) {
+	managed := strings.HasPrefix(source, s.root+string(os.PathSeparator))
+	for _, record := range s.list("") {
+		if record.Path != "" && (source == record.Path || strings.HasPrefix(source, record.Path+string(os.PathSeparator))) {
+			managed = true
+		}
+	}
+	if in.Recover == "" && managed {
 		codexFail(w, 409, "explicit_recovery_required")
 		return
 	}
@@ -355,7 +371,13 @@ func (m *codexRuntime) prepareWorkspace(t *codexThread, claim string, r workspac
 	defer func() { <-s.slots }()
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Minute)
 	defer cancel()
-	snap, e := s.capture(ctx, checkout.Options{Source: r.Source, Store: filepath.Join(s.root, "snapshots"), Ref: commit, Dirty: dirty})
+	root, e := s.selectWorktreeRoot(r.Source)
+	if e != nil {
+		m.workspaceFailed(r, "worktree_root_unavailable")
+		return
+	}
+	r.WorktreeRoot = root
+	snap, e := s.capture(ctx, checkout.Options{Source: r.Source, Store: filepath.Join(root, ".snapshots"), Ref: commit, Dirty: dirty})
 	if e != nil {
 		m.workspaceFailed(r, "snapshot_failed")
 		return
@@ -364,7 +386,7 @@ func (m *codexRuntime) prepareWorkspace(t *codexThread, claim string, r workspac
 	r.SnapshotPath = snap.Path
 	r.Repository = snap.Manifest.Repository
 	r.Base = snap.Manifest.Base
-	dest := filepath.Join(s.root, "trees", r.Issue, r.Tenure, r.Repository, r.ID)
+	dest := filepath.Join(root, r.ID)
 	r.Path = filepath.Join(dest, "worktree")
 	// Revalidate the exact original tenure around every side-effectful phase.
 	t.mu.Lock()

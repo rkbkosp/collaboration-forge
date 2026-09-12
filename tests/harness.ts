@@ -10,7 +10,7 @@ export async function startForge() {
   let closed = false;
 
   async function launch(address: string) {
-    child = spawn(resolve('bin/forged'), ['serve', '--data-dir', dataDir, '--project', 'e2e', '--listen', address], { stdio: ['ignore', 'ignore', 'pipe'] });
+    child = spawn(resolve('bin/forged'), ['serve', '--data-dir', dataDir, '--project', 'e2e', '--worktree-root', join(dataDir,'trees'), '--listen', address], { stdio: ['ignore', 'ignore', 'pipe'] });
     exited = new Promise<void>(r => child.once('close', () => r()));
     return new Promise<string>((ready, reject) => {
       const timer = setTimeout(() => reject(new Error('forged startup timeout')), 15_000);

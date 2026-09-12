@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/rkbkosp/collaboration-forge/internal/checkout"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -19,6 +20,7 @@ func TestWorkerCheckoutSharesLeaseAndReplaysArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.workspaces.worktreeRoot = filepath.Join(m.workspaces.root, "trees")
 	t.Cleanup(m.workspaces.close)
 	f.handler.(*toolHandler).checkouts = m
 	uid, _ := toolsCreate(t, f.handler, "worker checkout")
@@ -84,6 +86,7 @@ func TestWorkerCheckoutPersistenceFailureDoesNotDuplicateRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.workspaces.worktreeRoot = filepath.Join(m.workspaces.root, "trees")
 	t.Cleanup(m.workspaces.close)
 	f.handler.(*toolHandler).checkouts = m
 	uid, _ := toolsCreate(t, f.handler, "uncertain filesystem persistence")
@@ -117,6 +120,7 @@ func TestWorkerCheckoutPreparationReleaseAndRestartFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	m.workspaces.worktreeRoot = filepath.Join(m.workspaces.root, "trees")
 	t.Cleanup(m.workspaces.close)
 	f.handler.(*toolHandler).checkouts = m
 	uid, _ := toolsCreate(t, f.handler, "worker preparation lifecycle")

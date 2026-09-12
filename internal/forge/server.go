@@ -31,6 +31,7 @@ var ErrDataDirLocked = errors.New("forge: data directory is already locked")
 // AdminToken is required, is never persisted here, and must be at least 32
 // printable ASCII characters without whitespace. Treat it as a supervisor secret.
 type Config struct {
+	Project       ProjectConfig
 	WorkspaceRoot string // managed filesystem artifacts, not an Issue database
 	DataDir       string
 	ProjectName   string
@@ -167,6 +168,7 @@ func New(cfg Config) (_ *Server, err error) {
 		cancel()
 		return nil, err
 	}
+	s.codex.workspaces.worktreeRoot = cfg.Project.WorktreeRoot
 	s.handler = s.authenticatedHandler()
 	go func() {
 		codexDone := make(chan struct{})

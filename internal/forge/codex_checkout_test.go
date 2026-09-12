@@ -60,6 +60,7 @@ func TestCheckoutRequiresExistingTenureAndArchivesWithoutRemovingFiles(t *testin
 	if e != nil {
 		t.Fatal(e)
 	}
+	m.workspaces.worktreeRoot = filepath.Join(m.workspaces.root, "trees")
 	t.Cleanup(m.workspaces.close)
 	codexRequest(m, "register", map[string]any{"instance_id": "checkout", "pid": os.Getpid()}, codexTestToken)
 	i := codexIdentity{"checkout", "session", "thread"}
@@ -110,6 +111,7 @@ func checkoutFixture(t *testing.T) (*codexRuntime, codexIdentity, string, string
 	if e != nil {
 		t.Fatal(e)
 	}
+	m.workspaces.worktreeRoot = filepath.Join(m.workspaces.root, "trees")
 	t.Cleanup(m.workspaces.close)
 	i := codexIdentity{"workspace-instance", "session", "thread"}
 	toolsSuccess(t, codexRequest(m, "register", map[string]any{"instance_id": i.Instance, "pid": os.Getpid()}, codexTestToken))

@@ -28,25 +28,49 @@ not change its Controller. Codex's managed-directory shim is described below.
 
 Deploy compatible forged and CLI versions together. Do not point a running
 instance at a replacement daemon or restore credentials from old conversations.
-Choose an absolute, private artifact root **outside every source repository**:
+Worktree location is chosen for each source repository in this order:
+
+1. Explicit `project.worktree_root` from the host TOML configuration (or
+   `--worktree-root`, which overrides it).
+2. A per-user Forge root on the source filesystem:
+   `VOLUME_ROOT/.forge-worktrees-OS_UID`. The daemon detects the volume from
+   filesystem device IDs, resolves symlinks, and probes directory creation.
+3. If the same-volume root cannot be used, macOS falls back to
+   `~/Library/Application Support/Forge/worktrees` (the user configuration
+   directory's `Forge/worktrees` on other supported systems).
+
+```toml
+# /private/forge.toml
+[project]
+worktree_root = "/Volumes/SuperDisk/forge-worktrees"
+```
 
 ```sh
 forged serve --data-dir /private/fornax-data --project fornax \
-  --listen 127.0.0.1:7349 --workspace-root /private/fornax-workspaces
+  --listen 127.0.0.1:7349 --config /private/forge.toml
+# Equivalent root override: --worktree-root /Volumes/SuperDisk/forge-worktrees
 ```
 
-The default root is `DATA_DIR/workspaces`; if DATA_DIR is inside the repository,
-set `--workspace-root` outside it. Snapshot capture refuses a store inside its
-source repository. Separate project services/credentials remain separate. The
-daemon adds its persisted project UID to the root; no directory-name prefix
-selects a workspace's ledger.
+Explicit roots must be absolute and outside source repositories. An unusable
+explicit root fails checkout with `worktree_root_unavailable`; it does not
+silently disregard the user's choice. Snapshot capture also rejects a store
+inside the source repository. Unknown configuration fields fail startup.
 
-The launcher installs a temporary `forge` shim on the child PATH. Inside that
-server-provided artifact root it invokes the current CLI with the instance's
-existing environment. Outside managed worktrees it delegates to the original
-host CLI, preserving local repository/project routing. `FORGE_CODEX_CLI` is the
-absolute shim path for shells whose login configuration replaces PATH. This
-shim is convenience: the server still validates worker, instance and exact lease.
+Workspace records remain at `DATA_DIR/workspaces/PROJECT_UID/records` by default.
+The older `--workspace-root` option controls this record location; use the new
+`--worktree-root` option for checkout files. Retain the old record-root setting
+when upgrading an existing service. Existing long paths remain readable and
+recoverable without migration, movement, or deletion; a restart orphans their
+execution state as before. Root configuration changes apply to new checkouts.
+
+The launcher installs a temporary `forge` shim on the child PATH. It matches cwd
+against this project's recorded worktree locations, including subdirectories,
+and invokes the current CLI with the instance's existing environment. A path's
+spelling or directory hierarchy does not establish project identity. Outside
+registered worktrees it delegates to the original host CLI, preserving repository
+routing. `FORGE_CODEX_CLI` is the absolute shim path for shells whose login
+configuration replaces PATH. This shim is convenience: the server still validates
+worker, instance and exact lease.
 No globally installed wrapper or running service is changed by the source code.
 
 ## Original directory or isolated directory
@@ -105,13 +129,19 @@ repository, independently choosing a commit or dirty source. All use the same
 Kata tenure, but each has a different workspace ID and directory:
 
 ```text
-WORKSPACE_ROOT/PROJECT_UID/
-  records/WORKSPACE_ID.json
-  snapshots/SNAPSHOT_ID/
-  trees/ISSUE_UID/TENURE/REPOSITORY_ID/WORKSPACE_ID/
+RECORD_ROOT/PROJECT_UID/records/WORKSPACE_ID.json
+
+SELECTED_WORKTREE_ROOT/
+  .snapshots/SNAPSHOT_ID/
+  WORKSPACE_ID/
     repository.git/
     worktree/
 ```
+
+The workspace UUID is an opaque location key. Project, Issue, tenure, repository,
+and runtime relationships are record fields, never encoded in the directory
+hierarchy. Multiple projects may share a worktree root; their record stores and
+credentials remain separate. The returned `worktree` path is the tool cwd.
 
 Snapshot capture preserves source content without changing its index, branch or
 worktree. Repository IDs describe local Git common directories, not inferred

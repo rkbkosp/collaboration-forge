@@ -8,7 +8,11 @@ Ignored files, timestamps, owners and extended attributes are excluded. Symlink
 targets outside the repository are not copied. Source HEAD, index and files are
 never changed; capture uses optional-lock-free reads and a separate object store.
 
-The P0 format refuses submodules, nested repositories, unresolved merge stages,
+Initialized direct submodules are captured at their pinned Git commits, including
+offline bundles. Dirty mode requires each child to be clean and at its indexed
+commit; commit mode reads the pinned objects without copying child working edits.
+No remote URLs are fetched. Nested submodules, uninitialized children and unrelated
+nested repositories remain unsupported. The format also refuses unresolved merge stages,
 intent-to-add, assume-unchanged and skip-worktree entries. Known credential file
 names and private-key markers cause refusal without echoing content. This is a
 conservative detector, not proof that arbitrary source contains no secrets.

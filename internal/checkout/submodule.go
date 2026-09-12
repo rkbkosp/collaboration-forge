@@ -91,6 +91,10 @@ func captureSubmodule(ctx context.Context, root, tmp string, s Submodule) (strin
 
 func validateSubmodules(dir string, m Manifest) error {
 	links := map[string]string{}
+	work := map[string]Entry{}
+	for _, v := range m.Work {
+		work[v.Path] = v
+	}
 	for _, v := range m.Index {
 		if v.Mode == "160000" {
 			links[v.Path] = string(v.Data)
@@ -105,6 +109,15 @@ func validateSubmodules(dir string, m Manifest) error {
 			return errors.New("invalid submodule manifest")
 		}
 		seen[s.Path] = true
+		v, ok := work[s.Path]
+		if !ok || v.Mode != "160000" || string(v.Data) != s.Commit {
+			return errors.New("submodule work entry missing or replaced")
+		}
+		for p := filepath.Dir(s.Path); p != "."; p = filepath.Dir(p) {
+			if _, ok := work[p]; ok {
+				return errors.New("submodule path conflicts with working file or symlink")
+			}
+		}
 		paths := map[string]bool{}
 		for _, v := range s.Entries {
 			if safeEntry(v) != nil || v.Mode == "160000" || sensitive(v) || paths[v.Path] {

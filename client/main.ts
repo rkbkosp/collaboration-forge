@@ -23,6 +23,7 @@ forge human <same client arguments> [--format human|json]
 
 forge codex [Codex arguments...]  (daemon renewal + lifecycle hooks)
 forge codex --help-forge
+forge pi [Pi arguments...]       (routed Forge extension)
 forge checkout ISSUE (--ref COMMIT | --dirty) [--source REPO]
 forge checkout list | status WORKSPACE_ID | archive WORKSPACE_ID
 forge health | project

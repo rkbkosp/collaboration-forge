@@ -7,6 +7,20 @@ Forged must independently enforce worker capabilities and exact-lease close.
 
 ## Run
 
+When the machine provides registered host project bindings, the recommended
+entrypoint is:
+
+```sh
+forge pi
+```
+
+The host wrapper resolves the current canonical Git root, selects its Forge
+endpoint and worker-token file, and the repository CLI loads this extension. No
+port or token argument is needed. Unregistered repositories and conflicting
+connection overrides fail closed before Pi starts.
+
+For a portable/direct invocation without that host wrapper:
+
 ```sh
 npm ci
 export FORGE_URL=http://127.0.0.1:7347
@@ -23,8 +37,9 @@ with a port. Hostnames, paths, userinfo, query/fragment, shorthand/octal/integer
 IPv4 forms, and redirects are rejected. A private direct HTTP dispatcher bypasses
 Node environment proxies, so `HTTP_PROXY` / `NODE_USE_ENV_PROXY` cannot route
 Forge credentials away from loopback. Only the three environment variables
-above configure the production adapter; defaults are URL `http://127.0.0.1:7347`
-and TTL 300 seconds (valid range 60–3600).
+above configure the production adapter; `forge pi` supplies them through the host
+wrapper. Direct-mode defaults are URL `http://127.0.0.1:7347` and TTL 300 seconds
+(valid range 60–3600).
 
 For package installation use the root `pi.extensions` manifest, which selects
 only `pi-extension/forge.ts`, not the helper/test modules. CLI `-e` is convenient

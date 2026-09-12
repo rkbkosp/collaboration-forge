@@ -13,6 +13,7 @@ test('standalone help/version and failures have stable exit codes',async()=>{
  const help=(await cli(['--help'])).stdout;
  assert.match(help,/Forge client/);
  assert.match(help,/issue create --title TEXT \[--body TEXT \| --body-file FILE\]/);
+ assert.match(help,/forge pi \[Pi arguments\.\.\.\]/);
  assert.match((await cli(['--version'])).stdout,/0\.1\.0/);
  assert.equal((await cli(['issue','claim','abc4'])).code,2);
  assert.equal((await cli(['admin','reopen','abc4'])).code,2);

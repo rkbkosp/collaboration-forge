@@ -124,10 +124,26 @@ See [Codex setup, lifecycle and retry semantics](docs/codex.md) and
 
 Use Pi 0.85.1 and Node >=22.19:
 
+In a host with registered Forge project bindings, use the routed launcher:
+
+```sh
+forge pi
+```
+
+It keeps the current working directory, lets the host wrapper select the project
+endpoint and worker-token file from the canonical Git root, and loads the Forge
+extension automatically. Do not pass a port or token; unknown repositories and
+conflicting connection overrides fail before Pi starts. The launcher also removes
+stale CLI broker, supervisor and Codex runtime variables from the Pi process.
+
+For a portable/direct Pi invocation outside such a host wrapper, configure the
+three adapter variables explicitly:
+
 ```sh
 npm ci
 export FORGE_URL=http://127.0.0.1:7347
 export FORGE_WORKER_TOKEN_FILE="$PWD/.forge/worker-token"
+export FORGE_TTL_SECONDS=300
 pi -e ./pi-extension/forge.ts
 ```
 

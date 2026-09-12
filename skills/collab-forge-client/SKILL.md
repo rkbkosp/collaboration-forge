@@ -32,6 +32,19 @@ Forge 有两个实际入口，底层 Issue/lease 语义相同但 execution runti
 
 Pi 路径要求 Node >=22.19、Pi **0.85.1**：
 
+在已配置项目绑定的宿主 wrapper 中，优先使用仓库 CLI 的路由入口：
+
+```sh
+forge pi
+```
+
+它在启动 Pi 前按当前 canonical Git root 选择项目、loopback URL 和 worker
+token 文件，并自动加载 `pi-extension/forge.ts`；用户不需要指定端口或 token。
+未知仓库、冲突的连接覆盖和旧 socket 会 fail closed。Pi extension 本身不扫描
+端口、不从模型参数选择项目，也不复用 CLI broker。
+
+没有宿主 wrapper 时才使用显式 direct-mode 配置：
+
 ```sh
 npm ci
 export FORGE_URL=http://127.0.0.1:7347

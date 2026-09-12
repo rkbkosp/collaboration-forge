@@ -9,6 +9,7 @@ npm ci
 npm link                         # 可选：向当前 Node prefix 安装 forge 命令
 forge --help
 forge skill install --target "$HOME/.agents/skills/collab-forge-client"
+forge pi                         # host-routed Pi with the Forge extension
 ```
 
 不使用 `npm link` 时执行 `node /绝对路径/collab-forge/scripts/forge.mjs ...`。Skill 安装不覆盖已有目录；升级时由操作者先审核/备份旧 Skill。可用 `forge skill path` 查看随包分发的原文。支持 macOS/Linux、Node >=22.19；CLI 不要求安装 Pi 或调用模型。Pi extension 是另一条入口，直接加载 `pi-extension/forge.ts`，不使用本参考中的 session broker。
@@ -53,6 +54,7 @@ legacy session broker 规则；Codex 使用 forged daemon-owned runtime，不能
 | 命令 | 参数 |
 | --- | --- |
 | `health`、`project` | 健康与配置项目发现 |
+| `pi` | 通过宿主 cwd 项目绑定启动 Pi，并自动加载 Forge extension |
 | `issue list` | `--status open/closed`、`--limit 1..1000` |
 | `issue get REF` | 当前 issue、owner、lease、comments、links |
 | `issue graph REF` | `--depth 1..10` |

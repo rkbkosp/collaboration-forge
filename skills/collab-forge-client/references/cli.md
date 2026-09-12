@@ -11,7 +11,7 @@ forge --help
 forge skill install --target "$HOME/.agents/skills/collab-forge-client"
 ```
 
-不使用 `npm link` 时执行 `node /绝对路径/collab-forge/scripts/forge.mjs ...`。Skill 安装不覆盖已有目录；升级时由操作者先审核/备份旧 Skill。可用 `forge skill path` 查看随包分发的原文。支持 macOS/Linux、Node >=22.19；不要求安装 Pi 或调用模型。
+不使用 `npm link` 时执行 `node /绝对路径/collab-forge/scripts/forge.mjs ...`。Skill 安装不覆盖已有目录；升级时由操作者先审核/备份旧 Skill。可用 `forge skill path` 查看随包分发的原文。支持 macOS/Linux、Node >=22.19；CLI 不要求安装 Pi 或调用模型。Pi extension 是另一条入口，直接加载 `pi-extension/forge.ts`，不使用本参考中的 session broker。
 
 ## 配置
 
@@ -20,7 +20,13 @@ forge skill install --target "$HOME/.agents/skills/collab-forge-client"
 - `FORGE_ADMIN_TOKEN_FILE` / `--admin-token-file`：独立 supervisor 文件，仅 `admin` 命令使用。配置了它也不会让普通 worker 命令升级权限。
 - `FORGE_SOCKET` / `--socket`：该 worker 的前台 session broker socket，父目录 owned 0700、socket 0600，绝对路径不超过 100 bytes。已有路径不会被自动接管。
 - `--ttl`：session TTL，60–3600 秒，默认 300；heartbeat TTL/3、最长 30 秒。
-- `--session-id`：可选 v4/v7 session UUID，仅作公开归属关联，不是 execution proof。通常让 CLI 自动生成。
+- `--session-id`：可选标准 UUID，仅作公开归属关联，不是 execution proof。通常让 CLI 自动生成；Pi 使用 Pi 自己的真实 session UUID，不能用 CLI 参数覆盖。
+
+不传 `--socket` 的 `forge session start` 会自动生成
+`/tmp/forge-client-<uid>/<uuid>.sock`，并在 stdout 输出 socket、sessionID 和
+protocol；`start` 仍保持前台运行。`forge health` 不带 socket 时只验证 loopback URL
+并访问公开 `/health`，不需要 worker token；`project`、issue/tool 操作和带 socket
+的 health 则使用 broker 配置。
 
 不要将凭据放 argv、shell history、模型上下文或证据文件。0600 不能防同 UID 的工具读取文件；不可信 worker 需要额外账户/沙箱/凭据代理，且不能访问 supervisor 文件、服务 DB 或 signing key。
 
@@ -38,6 +44,11 @@ forge human admin list --status open
 ```
 
 Human 模式只改变成功结果的渲染，不改变参数校验、权限、session、网络或 mutation 语义；默认输出稳定的标题、字段和表格，并过滤 execution/attempt/token 字段。需要脚本处理时使用 `--format json` 或 `--json` 恢复 JSON stdout。错误仍为相同的 JSON stderr envelope：`{"error":{"code","message","ambiguous", "hint?", "data?"},"status?}`。
+
+顶层 `forge codex ...` 和 `forge checkout ...` 由独立模块处理，不应套用下面的
+legacy session broker 规则；Codex 使用 forged daemon-owned runtime，不能在其中再
+启动 `forge session start`。`forge --help` 会列出这两组命令，核心 worker CLI 的
+安装、配置和 issue/tool 规则仍如下。
 
 | 命令 | 参数 |
 | --- | --- |
@@ -65,6 +76,11 @@ Human 模式只改变成功结果的渲染，不改变参数校验、权限、se
 普通贡献可以不启动 broker，此时每个 CLI 调用是短暂客户端；若需要统一 session 归属或执行生命周期，所有调用带同一私有 socket。不带 socket 的 claim/renew/release/close 会拒绝，而不是创建瞬间释放的虚假执行。
 
 JSON 输入必须是对象。命名 flag 不能覆盖 `--data` 中同名字段。`--data-file`、body/message/evidence 文件支持 `-` 从 stdin 读取，最大 1 MiB；同一命令不要多次消费 stdin。
+
+限制也适用于恢复判断：session IPC 请求/响应上限分别为 1 MiB/8 MiB，读写 I/O
+超时 5 秒，单个 broker operation 30 秒；直接 Controller 请求默认 10 秒，普通
+ClientHTTP read/project/health 请求 15 秒。超时或已发出的 mutation 必须按“不确定”
+处理并按本参考重试，不能盲目重发。
 
 Timeline 根据**扫描过的所有项目事件**推进 cursor，即使该页过滤后没有事件也要继续。分页上限会显式 `truncated:true`；单次聚合超过 8 MiB 报错，改为逐页读取。缺失历史不能由客户端恢复。
 

@@ -28,7 +28,7 @@ forge checkout list | status WORKSPACE_ID | archive WORKSPACE_ID
 forge health | project
 forge issue list [--status open|closed] [--limit N]
 forge issue get REF | graph REF [--depth 1..10]
-forge issue create --title TEXT [--body-file FILE]
+forge issue create --title TEXT [--body TEXT | --body-file FILE]
 forge issue comment REF --body TEXT | --body-file FILE
 forge issue link REF --type parent|blocks|related --to-ref REF
 forge issue timeline REF [--after-id N] [--limit N] [--all] [--max-pages N]

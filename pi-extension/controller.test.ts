@@ -96,6 +96,28 @@ function harness() {
 
 const closeBody = { ref: "#1", reason: "done", message: "Implemented and verified behavior", evidence: [{ type: "test", command: "npm test" }] };
 
+test("checkout uses the active proof and retains its logical request across ambiguous responses", async () => {
+ const h=harness();const c=h.controller();
+ await assert.rejects(c.execute("checkout",{ref:"#1",source:"/repo",dirty:true}));
+ await c.execute("issue_claim",{ref:"#1"});
+ let fail=true;
+ h.intercept(call=>{if(call.name!=="checkout")return;
+  assert.equal(call.headers.get("X-Forge-Execution"),"signed-secret-claim-1");
+  assert.equal(call.body.ref,"issue-uid");
+  if(fail){fail=false;throw new Error("lost checkout response")}
+  return new Response(JSON.stringify({workspace_id:"job",state:"preparing"}));
+ });
+ await assert.rejects(c.execute("checkout",{ref:"#1",source:"/repo",dirty:true}));
+ assert.equal(c.state().pendingCheckout,true);
+ await assert.rejects(c.execute("checkout",{ref:"#1",source:"/different",dirty:true}));
+ const result=await c.retryPending();assert.equal(result.workspace_id,"job");
+ const calls=h.calls.filter(x=>x.name==="checkout");assert.equal(calls.length,2);
+ assert.equal(calls[0].headers.get("Idempotency-Key"),calls[1].headers.get("Idempotency-Key"));
+ assert.equal(h.calls.filter(x=>x.name==="issue_claim").length,1);
+ assert.equal(c.state().pendingCheckout,false);
+ await c.shutdown();
+});
+
 test("ambiguous acquire reuses attempt; cross-ref blocked; release/new runtime/new tenure use new identities", async () => {
   const h = harness(); const a = h.controller();
   h.faultClaim();

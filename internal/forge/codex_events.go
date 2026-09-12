@@ -121,7 +121,7 @@ func (m *codexRuntime) refreshCodex(t *codexThread) {
 		return
 	}
 	deadline := started.Add(expires.Sub(now) - time.Second)
-	if deadline.Before(t.active.deadline) {
+	if t.workerSession != "" || deadline.Before(t.active.deadline) {
 		t.active.deadline = deadline
 	}
 	if !time.Now().Before(t.active.deadline) {

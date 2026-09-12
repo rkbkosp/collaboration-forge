@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import {spawnSync} from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -17,6 +18,8 @@ const issueTools = [
   'issue_claim', 'issue_close', 'issue_comment', 'issue_create', 'issue_get',
   'issue_graph', 'issue_link', 'issue_list', 'issue_release', 'issue_renew',
 ];
+const checkoutTools=['checkout','checkout_archive','checkout_list','checkout_status'];
+const allTools=[...checkoutTools,...issueTools].sort();
 
 /**
  * Real SDK smoke, not a fake ExtensionAPI or fake provider:
@@ -124,7 +127,7 @@ test('Pi 0.85.1 SDK loads Forge and connects real runtime lifecycle/tools to Kat
     });
     const snapshot = (ref: string) => forge.admin(`/api/v1/projects/${forge.projectID}/issues/${ref}`);
 
-    assert.deepEqual(current.getActiveToolNames().sort(), issueTools);
+    assert.deepEqual(current.getActiveToolNames().sort(), allTools);
     assert.deepEqual(current.getAllTools().filter(item => item.name.startsWith('issue_')).map(item => item.name).sort(), issueTools);
     for (const name of issueTools) {
       assert.equal(current.getAllTools().find(item => item.name === name)?.sourceInfo.path, extensionPath);
@@ -162,6 +165,14 @@ test('Pi 0.85.1 SDK loads Forge and connects real runtime lifecycle/tools to Kat
     assert.ok(contributed.comments.some((comment: any) => comment.body === note));
     assert.ok(contributed.links.some((link: any) => link.type === 'related' && link.to.uid === peerUID));
     assert.equal((await execute('issue_claim', { ref: peerUID })).body.granted, true);
+    const git=(args:string[])=>{const result=spawnSync('git',args,{cwd,encoding:'utf8'});assert.equal(result.status,0,result.stderr)};
+    git(['init','-q']);git(['config','user.name','Fixture']);git(['config','user.email','fixture@example.invalid']);
+    await writeFile(join(cwd,'checkout-fixture.txt'),'base\n');git(['add','.']);git(['commit','-qm','fixture']);
+    let workspace=(await execute('checkout',{ref:peerUID,source:cwd,dirty:true})).body;
+    while(workspace.state==='preparing'){await new Promise(r=>setTimeout(r,20));workspace=(await execute('checkout_status',{workspace_id:workspace.workspace_id})).body}
+    assert.equal(workspace.state,'ready');
+    assert.equal(await readFile(join(workspace.worktree,'checkout-fixture.txt'),'utf8'),'base\n');
+    assert.equal((await execute('checkout_list',{ref:peerUID})).body.workspaces.length,1);
     assert.equal((await execute('issue_release', { ref: peerUID })).body.granted, true);
     assert.equal((await snapshot(peerUID)).lease ?? null, null);
     assert.equal((await execute('issue_claim', { ref: peerUID })).body.granted, true);
@@ -171,6 +182,9 @@ test('Pi 0.85.1 SDK loads Forge and connects real runtime lifecycle/tools to Kat
     });
     assert.equal(closed.changed, true);
     assert.equal((await snapshot(peerUID)).issue.status, 'closed');
+    const archived=(await execute('checkout_archive',{workspace_id:workspace.workspace_id})).body;
+    assert.equal(archived.state,'archived');
+    assert.equal(await readFile(join(workspace.worktree,'checkout-fixture.txt'),'utf8'),'base\n');
 
     await t.test('registered graph schema and execution agree with the server depth bound', async () => {
       assert.equal(Check(tool('issue_graph').parameters, { ref, depth: 10 }), true);
@@ -253,7 +267,7 @@ test('Pi 0.85.1 SDK loads Forge and connects real runtime lifecycle/tools to Kat
     assert.deepEqual(errors, []);
     assert.equal(outsideFetches, 0);
     const workerCalls = requests.filter(request => request.path.startsWith('/forge/v1/tools/'));
-    assert.deepEqual([...new Set(workerCalls.map(request => request.path.split('/').at(-1)))].sort(), issueTools);
+    assert.deepEqual([...new Set(workerCalls.map(request => request.path.split('/').at(-1)))].sort(), allTools);
     assert.ok(workerCalls.every(request => request.method === 'POST' && request.sessionID === sessionManager.getSessionId()));
     assert.equal(current.agent.state.isStreaming, false);
     t.diagnostic('Real SDK loader/session/tree/reload and registered tools -> real forged/Kata verified; hooks/quit explicitly dispatched, no LLM/TUI/RPC or OS-signal interaction claimed.');

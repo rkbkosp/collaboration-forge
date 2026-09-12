@@ -17,13 +17,15 @@ import (
 // Ephemeral coordination only. Kata remains the lease/issue/event authority.
 // Restart rejects all old instance capabilities; no execution is restored.
 type codexRuntime struct {
-	workspaces *workspaceStore
-	mu         sync.Mutex
-	instances  map[string]*codexInstance
-	threads    map[codexIdentity]*codexThread
-	ended      map[codexSessionKey]bool
-	tools      http.Handler
-	alive      func(int, string) bool
+	workspaceGates [64]sync.Mutex
+	workspaces     *workspaceStore
+	mu             sync.Mutex
+	instances      map[string]*codexInstance
+	threads        map[codexIdentity]*codexThread
+	workers        map[codexIdentity]*codexThread
+	ended          map[codexSessionKey]bool
+	tools          http.Handler
+	alive          func(int, string) bool
 }
 type codexInstance struct {
 	token   [32]byte
@@ -34,22 +36,26 @@ type codexInstance struct {
 	ttl     int
 }
 type codexThread struct {
-	mu            sync.Mutex
-	identity      codexIdentity
-	instance      *codexInstance
-	retired       bool
-	release       bool
-	paused        bool
-	unknown       bool
-	lastSeen      time.Time
-	nextRenew     time.Time
-	active        *codexTenure
-	pending       *codexPending
-	receipts      map[string]*codexReceipt
-	receiptOrder  []string
-	receiptBytes  int
-	lastExecution []byte
-	lastOperation string
+	// Non-Codex adapter: caller owns renewal, only the verified proof is kept
+	// during filesystem work. Never inserted into the Codex renewal registry.
+	workerSession                          string
+	workspaceRequest, workspaceFingerprint string
+	mu                                     sync.Mutex
+	identity                               codexIdentity
+	instance                               *codexInstance
+	retired                                bool
+	release                                bool
+	paused                                 bool
+	unknown                                bool
+	lastSeen                               time.Time
+	nextRenew                              time.Time
+	active                                 *codexTenure
+	pending                                *codexPending
+	receipts                               map[string]*codexReceipt
+	receiptOrder                           []string
+	receiptBytes                           int
+	lastExecution                          []byte
+	lastOperation                          string
 }
 type codexTenure struct {
 	ref, alias, token, claim string
@@ -241,10 +247,16 @@ func (m *codexRuntime) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (m *codexRuntime) dispatch(t *codexThread, op string, params json.RawMessage, token, key string) *httptest.ResponseRecorder {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx = context.WithValue(ctx, codexAttributionKey{}, t.identity)
+	if t.workerSession == "" {
+		ctx = context.WithValue(ctx, codexAttributionKey{}, t.identity)
+	}
 	r, _ := http.NewRequestWithContext(ctx, "POST", "/forge/v1/tools/"+op, bytes.NewReader(params))
 	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("X-Forge-Session", t.identity.runtime())
+	session := t.workerSession
+	if session == "" {
+		session = t.identity.runtime()
+	}
+	r.Header.Set("X-Forge-Session", session)
 	if token != "" {
 		r.Header.Set("X-Forge-Execution", token)
 	}

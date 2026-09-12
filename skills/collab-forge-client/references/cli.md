@@ -46,15 +46,17 @@ forge human admin list --status open
 
 Human 模式只改变成功结果的渲染，不改变参数校验、权限、session、网络或 mutation 语义；默认输出稳定的标题、字段和表格，并过滤 execution/attempt/token 字段。需要脚本处理时使用 `--format json` 或 `--json` 恢复 JSON stdout。错误仍为相同的 JSON stderr envelope：`{"error":{"code","message","ambiguous", "hint?", "data?"},"status?}`。
 
-顶层 `forge codex ...` 和 `forge checkout ...` 由独立模块处理，不应套用下面的
-legacy session broker 规则；Codex 使用 forged daemon-owned runtime，不能在其中再
-启动 `forge session start`。`forge --help` 会列出这两组命令，核心 worker CLI 的
-安装、配置和 issue/tool 规则仍如下。
+`forge codex ...` 使用 forged daemon-owned runtime，不能在其中再启动 session broker。
+`forge checkout ...` 在 Codex 内使用该 runtime，在普通 CLI 中使用当前私有 socket；
+Pi 使用自己的 checkout tool。创建工作区要求已有 claim，不会增加另一个续租器。
+普通 CLI 的 checkout list/status/archive 可只用项目 worker 配置；archive 要求 Issue 已关闭。
 
 | 命令 | 参数 |
 | --- | --- |
 | `health`、`project` | 健康与配置项目发现 |
 | `pi` | 通过宿主 cwd 项目绑定启动 Pi，并自动加载 Forge extension |
+| `checkout ISSUE` | `--dirty` 或 `--ref COMMIT`；`--source REPO` 或 `--recover ID`；`--socket PATH`、`--no-wait` |
+| `checkout list/status/archive` | `list [ISSUE]`、`status ID`、`archive ID`；返回工作区元数据 |
 | `issue list` | `--status open/closed`、`--limit 1..1000` |
 | `issue get REF` | 当前 issue、owner、lease、comments、links |
 | `issue graph REF` | `--depth 1..10` |

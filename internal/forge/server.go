@@ -157,6 +157,7 @@ func New(cfg Config) (_ *Server, err error) {
 	s := &Server{service: svc, project: result.Project, config: cfg, signer: signer, lock: lock, cancel: cancel, runDone: make(chan struct{})}
 	s.tools = newToolHandler(svc.Handler(), result.Project, signer)
 	s.codex = newCodexRuntime(s.tools)
+	s.tools.(*toolHandler).checkouts = s.codex
 	workspaceRoot := cfg.WorkspaceRoot
 	if workspaceRoot == "" {
 		workspaceRoot = filepath.Join(dir, "workspaces")

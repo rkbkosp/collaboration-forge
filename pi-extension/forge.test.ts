@@ -28,8 +28,8 @@ test("env config allows only loopback literal origins and reads owned 0600 token
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
-test("all 10 schemas reject authority/protocol input and typed evidence rejects extra fields", () => {
-  assert.equal(Object.keys(toolSchemas).length, 10);
+test("all schemas reject authority/protocol input and typed evidence rejects extra fields", () => {
+  assert.equal(Object.keys(toolSchemas).length, 14);
   for (const schema of Object.values(toolSchemas)) {
     assert.equal((schema as { additionalProperties?: unknown }).additionalProperties, false);
     assert.ok(!/attempt_id|execution_token|claim_uid|ClaimUID|client_kind|actor|force|metadata|replace|retry_protocol/.test(JSON.stringify(schema)));
@@ -75,7 +75,7 @@ test("adapter uses Pi 0.85.1 start/shutdown lifecycle; tree no-op; no history re
     created.push(c); return c;
   });
   assert.equal(created.length, 0);
-  assert.equal(pi.tools.length, 10);
+  assert.equal(pi.tools.length, 14);
   assert.equal(pi.handlers.has("session_switch"), false);
   const sessionId = randomUUID();
   for (const reason of ["startup", "reload", "new", "resume", "fork"]) {

@@ -136,6 +136,11 @@ extension automatically. Do not pass a port or token; unknown repositories and
 conflicting connection overrides fail before Pi starts. The launcher also removes
 stale CLI broker, supervisor and Codex runtime variables from the Pi process.
 
+After claiming an Issue, Pi's `checkout` tool can create one worktree per source
+repository under the same execution. CLI sessions use `forge checkout ... --socket
+SOCKET`. See [claimed-Issue worktrees](docs/codex-checkout.md) for multi-repository
+use, pinned submodules, archive/recovery and matching-version deployment.
+
 For a portable/direct Pi invocation outside such a host wrapper, configure the
 three adapter variables explicitly:
 

@@ -1,9 +1,28 @@
-# Optional Codex Issue worktrees
+# Optional claimed-Issue worktrees
 
 Claim owns execution authority. Checkout owns a filesystem artifact attached to
 that **same** authority. Claim does not create a worktree, change branches or
 change Codex's working directory. The ordinary in-place workflow remains valid.
 There is no new claim, execution broker or renewer when running `forge checkout`.
+
+Codex uses its daemon-managed runtime. CLI uses the existing session broker;
+Pi uses its existing Controller through the `checkout`, `checkout_status`,
+`checkout_list` and `checkout_archive` tools. All three share the same artifact
+store and server-side execution proof checks.
+
+For an ordinary CLI session, claim first using that session's private socket,
+then invoke `forge checkout ISSUE --dirty --source REPO --socket SOCKET` (or set
+`FORGE_SOCKET`). List/status/archive may also run with the project worker
+configuration without a broker. An ambiguous CLI create is resolved with
+`forge session retry --socket SOCKET`; Pi repeats the identical checkout tool
+arguments. The original private key/proof remain in that runtime's memory.
+Do not start a broker inside Pi or Codex to run checkout.
+
+When a host wrapper routes by Git root or refuses socket overrides, use the
+absolute installed entrypoint, `node /installed/forge/scripts/forge.mjs`, with
+the same explicit socket inside managed CLI worktrees. Pi continues using its
+registered tools and fixed project configuration; changing a shell cwd does
+not change its Controller. Codex's managed-directory shim is described below.
 
 ## Setup after deployment
 
@@ -45,7 +64,10 @@ forge checkout ISSUE --dirty --source /path/to/repository
 working bytes and ordinary untracked files; ignored files are excluded. Capture
 rescans the source and rejects changes during capture. Stop source writers first.
 `--ref` captures the resolved commit and excludes working-copy changes.
-Existing snapshot limits still apply: submodules, nested repositories, unresolved
+Initialized direct submodules are captured at the indexed/selected commit with
+their own offline bundles. Dirty mode rejects dirty or unpinned child worktrees;
+commit mode excludes their working edits. Remote submodule URLs are never fetched.
+Existing snapshot limits still apply: nested submodules/repositories, unresolved
 index conflicts, unsupported entries and recognized credential material are
 rejected. This does not copy dependency installations, local secrets or ignored
 build output; initialize dependencies in the new worktree as appropriate.
@@ -106,7 +128,7 @@ forge issue close ISSUE --data-file truthful-close.json
 ```
 
 Close is refused while an attached checkout is still preparing. A confirmed
-Codex facade close automatically marks its attached workspaces `archived`,
+Codex, CLI or Pi facade close automatically marks its attached workspaces `archived`,
 including multi-repository work. Archive updates metadata **in place**: no move,
 no deletion, no branch removal and no automatic merge. It does not assert that
 all file changes were committed or that they passed tests.
@@ -124,8 +146,10 @@ archiving retained records after daemon restart or an external Human close. Disk
 failure during a close/crash may leave a record orphaned rather than archived;
 check the authoritative Issue and run this command to reconcile it.
 
-Pause/interrupt marks ready workspaces paused. Release, lost runtime, missed
-shutdown and daemon restart leave orphaned artifacts, preserving files. A new
+Codex pause/interrupt marks ready workspaces paused. Release and daemon restart
+leave orphaned artifacts, preserving files. CLI/Pi crashes rely on lease TTL;
+retained `ready` metadata only describes preparation, never current authority.
+Always check the live issue before continuing work. A new
 runtime never regains authority merely by reading a retained record. Reclaim the
 Issue, then explicitly recover into a **new** worktree:
 

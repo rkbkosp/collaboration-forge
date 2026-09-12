@@ -47,6 +47,20 @@ for trials; follow Pi's extension installation guidance for normal discovery.
 
 ## Tools and workflow
 
+The four checkout tools join the ten issue tools. After claiming, call
+`checkout` with `{ref, source: "/absolute/repository", dirty: true}` or `commit`
+instead of `dirty`. For multiple repositories call once per repository under the
+same Issue. Poll `checkout_status` by `workspace_id` until `ready`, then use the
+returned worktree as the explicit cwd for shell/edit/test tools. Do not create
+a CLI broker to access the Pi claim. Ambiguous creation retains its key/proof;
+retry the identical checkout tool arguments. `checkout_list` inventories artifacts;
+close archives all attached workspaces without deleting or merging files.
+`checkout_archive` retries metadata archive after the issue is closed.
+
+See [checkout contract](../docs/codex-checkout.md) for pinned submodules, retained
+recovery and deployment requirements. CLI, extension and daemon must be updated
+together; old daemons return `checkout_unavailable` through the client.
+
 Ten model tools: `issue_list`, `issue_get`, `issue_graph`, `issue_create`,
 `issue_comment`, `issue_link`, `issue_claim`, `issue_renew`, `issue_release`,
 `issue_close`. Tool schemas reject extra fields, including authority, execution,

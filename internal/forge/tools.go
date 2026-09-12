@@ -22,9 +22,10 @@ const (
 )
 
 type toolHandler struct {
-	handler http.Handler
-	project kata.Project
-	signer  executionSigner
+	checkouts *codexRuntime
+	handler   http.Handler
+	project   kata.Project
+	signer    executionSigner
 }
 
 // newToolHandler is an in-process typed façade, not an authentication boundary.
@@ -67,6 +68,8 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 		h.dispatch(r.Context(), principal, op, method, path, body, headers).serve(w)
 	}
 	switch operation {
+	case "checkout", "checkout_list", "checkout_status", "checkout_archive":
+		h.workerCheckout(w, r, runtime, operation)
 	case "issue_workspace":
 		h.workspace(w, r, runtime, principal)
 	case "issue_list":
@@ -260,7 +263,15 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 			return
 		}
 		principal.Subject = proof.Subject
-		forward("releaseIssueLease", http.MethodPost, base+"/"+proof.IssueUID+"/lease/actions/release", toolReleaseBody{Reason: in.Reason}, nil)
+		if h.checkouts != nil {
+			unlock := h.checkouts.lockWorkerWorkspace(proof)
+			defer unlock()
+		}
+		result := h.dispatch(r.Context(), principal, "releaseIssueLease", http.MethodPost, base+"/"+proof.IssueUID+"/lease/actions/release", toolReleaseBody{Reason: in.Reason}, nil)
+		if result.success() && h.checkouts != nil && h.checkouts.hasWorkerWorkspaces(runtime, proof) {
+			h.checkouts.retireWorkerWorkspaces(runtime, proof)
+		}
+		result.serve(w)
 	case "issue_close":
 		in, ok := decodeToolInput[issueCloseInput](w, r)
 		if !ok {
@@ -293,7 +304,31 @@ func (h *toolHandler) invoke(w http.ResponseWriter, r *http.Request, operation, 
 		// STRICT CLOSE: no show/status/live-lease preflight. Kata's atomic
 		// close-v2 guard checks exact ClaimUID + complete host principal and
 		// releases the lease. K7 must replay receipts BEFORE live validation.
-		forward("closeIssue", http.MethodPost, base+"/"+proof.IssueUID+"/actions/close", toolCloseBody{Reason: in.Reason, Message: in.Message, Evidence: in.Evidence, RetryProtocol: "close-v2"}, headers)
+		var workspaceThread *codexThread
+		if h.checkouts != nil {
+			unlock := h.checkouts.lockWorkerWorkspace(proof)
+			defer unlock()
+		}
+		if h.checkouts != nil && h.checkouts.hasWorkerWorkspaces(runtime, proof) {
+			workspaceThread = h.checkouts.workerThread(runtime, proof)
+			if workspaceThread == nil {
+				toolError(429, "workspace_limit", "workspace runtime limit").serve(w)
+				return
+			}
+			workspaceThread.mu.Lock()
+			defer workspaceThread.mu.Unlock()
+			// Only preparing filesystem jobs block the first close. A confirmed
+			// close cannot leave one preparing; receipt replay still reaches Kata.
+			if h.checkouts.workerCheckoutBusy(proof) {
+				toolError(409, "checkout_busy", "wait for checkout preparation before closing").serve(w)
+				return
+			}
+		}
+		result := h.dispatch(r.Context(), principal, "closeIssue", http.MethodPost, base+"/"+proof.IssueUID+"/actions/close", toolCloseBody{Reason: in.Reason, Message: in.Message, Evidence: in.Evidence, RetryProtocol: "close-v2"}, headers)
+		if result.success() && workspaceThread != nil {
+			result = result.withFields(map[string]any{"workspace_archive": h.checkouts.archiveWorkspaces(workspaceThread, proof.ClaimUID)})
+		}
+		result.serve(w)
 	default:
 		toolError(http.StatusNotFound, "not_found", "unknown tool operation").serve(w)
 	}

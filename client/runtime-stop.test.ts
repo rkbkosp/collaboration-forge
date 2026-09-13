@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { stopDecision } from './stop.ts';
+import { stopDecision } from './runtime-stop.ts';
 test('strict blocks held/pending work once, never loops or blocks a user pause',()=>{
  assert.equal(stopDecision({active:true},{},'strict').decision,'block');
  assert.equal(stopDecision({pending:true},{},'strict').decision,'block');

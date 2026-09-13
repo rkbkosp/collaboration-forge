@@ -15,6 +15,7 @@
     "pi-extension/**/*.ts",
     "tests/**/*.ts",
     "client/**/*.ts",
-    "codex/**/*.ts"
+    "codex/**/*.ts",
+    "claude/**/*.ts"
   ]
 }

@@ -1,5 +1,5 @@
 import { codexRPC, CodexError } from './transport.ts';
-import { stopDecision } from './stop.ts';
+import { stopDecision } from '../client/runtime-stop.ts';
 import { codexIdentity } from './facade.ts';
 export const PROTOCOL='Forge is this workspace\'s work ledger. Before substantial work, inspect and claim the relevant issue with forge issue. Record discoveries as comments/issues/links. Close with truthful typed evidence, or release when handing off. After claiming, work in the original directory or use forge checkout ISSUE --dirty / --ref COMMIT for isolation (one per repository). Use the returned worktree as the explicit cwd for shell/edit/test tools. In isolated directories use "$FORGE_CODEX_CLI" if a shell profile overrides forge. Completed checkouts are archived without deletion. Use forge --help. Runtime authority and renewal are managed by forged; never start a legacy session broker inside Codex.';
 export async function handleHook(input:any,env:NodeJS.ProcessEnv=process.env,rpc:typeof codexRPC=codexRPC):Promise<any>{

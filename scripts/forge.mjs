@@ -11,6 +11,9 @@ if(process.argv[2]==='checkout'){
 }else if(process.argv[2]==='codex'){
  const {codexCommand}=await import('../codex/cli.ts');
  process.exitCode=await codexCommand(process.argv.slice(3));
+}else if(process.argv[2]==='claude'){
+ const {claudeCommand}=await import('../claude/cli.ts');
+ process.exitCode=await claudeCommand(process.argv.slice(3));
 }else{
  const {main}=await import('../client/main.ts');
  process.exitCode=await main(process.argv.slice(2));

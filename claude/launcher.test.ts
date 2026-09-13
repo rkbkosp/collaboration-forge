@@ -1,6 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { launchClaude, claudeArguments, claudeEnvironment, CLAUDE_PLUGIN_DIR } from './launcher.ts';
+import { handleHook } from './hook.ts';
+
+test('launcher preserves the configured Stop policy through to the child hook', async () => {
+  for (const policy of ['strict', 'advisory', undefined]) {
+    await launchClaude([], { FORGE_CLAUDE_STOP_POLICY: policy }, {
+      register: async () => ({}), end: async () => {},
+      run: async (_bin, _args, childEnv) => {
+        assert.equal(childEnv.FORGE_CLAUDE_STOP_POLICY, policy);
+        const output = await handleHook({ hook_event_name: 'Stop', session_id: 'policy-test' }, childEnv, { rpc: async () => ({ active: true, issue: 'owned' }) });
+        assert.equal(output.decision, policy === 'advisory' ? undefined : 'block');
+        return { code: 0, signal: null };
+      },
+    });
+  }
+});
 
 test('the bundled plugin is injected once and the user\'s own plugin arguments survive', () => {
   assert.deepEqual(claudeArguments(['--resume', 'abc']), ['--plugin-dir', CLAUDE_PLUGIN_DIR, '--resume', 'abc']);

@@ -51,6 +51,8 @@ export function claudeArguments(args: string[], plugin = CLAUDE_PLUGIN_DIR): str
 export function claudeEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const childEnv = { ...env };
   for (const key of Object.keys(childEnv)) {
+    // User policy is configuration, not inherited runtime authority.
+    if (key === 'FORGE_CLAUDE_STOP_POLICY') continue;
     if (key.startsWith('FORGE_CODEX_') || key.startsWith('FORGE_CLAUDE_')) delete childEnv[key];
   }
   for (const key of [

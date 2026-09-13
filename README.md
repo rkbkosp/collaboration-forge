@@ -120,6 +120,13 @@ session/subagent context, compaction recovery, bounded Stop checks and cleanup.
 See [Codex setup, lifecycle and retry semantics](docs/codex.md) and
 [optional claimed-Issue worktrees](docs/codex-checkout.md).
 
+## Claude Code adapter
+
+Use `forge claude` to launch Claude Code with the bundled Forge plugin injected
+automatically — no separate install step. Standard `forge issue` and
+`forge checkout` commands then use daemon-owned execution and automatic renewal.
+See [Claude setup, lifecycle and retry semantics](docs/claude.md).
+
 `forge pi`, `forge codex` and `forge claude` are equal top-level harness
 entrypoints that share one Issue/lease/evidence authority; see the
 [harness adapter contract](docs/harness-adapters.md).

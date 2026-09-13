@@ -43,7 +43,8 @@
     "test:checkout-e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-checkout-e2e.test.ts",
     "test:checkout-live": "go build -o bin/forged ./cmd/forged && tsx --test tests/codex-checkout-live.test.ts",
     "test:claude": "tsx --test claude/*.test.ts",
-    "test:claude-e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/claude-e2e.test.ts"
+    "test:claude-e2e": "go build -o bin/forged ./cmd/forged && tsx --test tests/claude-e2e.test.ts",
+    "test:claude-live": "go build -o bin/forged ./cmd/forged && tsx --test tests/claude-live-smoke.test.ts"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.85.1",

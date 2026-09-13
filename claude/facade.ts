@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { claudeRPC, ClaudeError } from './transport.ts';
-import { readBinding } from './binding.ts';
 
 /**
  * Claude-native attribution: the launcher's instance, the hook's canonical
@@ -19,39 +18,13 @@ export function validateIdentity(identity: Identity): Identity {
   return identity;
 }
 
-/**
- * Resolve the acting agent, most specific first.
- *
- * The binding wins. This matters even though `SessionStart` publishes `main` into
- * CLAUDE_ENV_FILE, and therefore into the environment of every Bash call: Claude
- * runs that preamble for a subagent's shell too, and the subagent's `PreToolUse`
- * writes its own binding first. If the published value outranked the binding,
- * every subagent would be attributed to the main agent and its own acquire would
- * target the main agent's tenure.
- *
- * With no binding (an ordinary main-agent call between shell invocations, or a
- * stale one), the published value applies, defaulting to `main`.
- *
- * This is cooperative attribution, not authority: forged still enforces the
- * worker credential, the instance capability and the exact live ClaimUID.
- */
-export function resolveAgent(env: NodeJS.ProcessEnv = process.env, read = readBinding): string | undefined {
-  // The binding describes the shell about to run, so it is the most specific
-  // signal and is consulted first.
-  let bound: string | undefined;
-  try { bound = read(env); } catch { bound = undefined; }
-  if (valid(bound)) return bound;
-  const explicit = env.FORGE_CLAUDE_AGENT_ID;
-  if (valid(explicit)) return explicit;
-  return undefined;
-}
-
-/** `agent_id` defaults to `main`, which is what a main-agent hook reports. */
+/** Bash calls must carry the identity injected into that individual command. */
 export function claudeIdentity(env: NodeJS.ProcessEnv = process.env): Identity {
-  const instance_id = env.FORGE_CLAUDE_INSTANCE_ID;
-  const session_id = env.FORGE_CLAUDE_SESSION_ID;
-  const agent_id = resolveAgent(env) ?? 'main';
-  return validateIdentity({ instance_id: instance_id ?? '', session_id: session_id ?? '', agent_id });
+  return validateIdentity({
+    instance_id: env.FORGE_CLAUDE_INSTANCE_ID ?? '',
+    session_id: env.FORGE_CLAUDE_SESSION_ID ?? '',
+    agent_id: env.FORGE_CLAUDE_AGENT_ID ?? '',
+  });
 }
 
 /**

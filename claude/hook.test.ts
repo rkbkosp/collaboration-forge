@@ -1,11 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handleHook, PROTOCOL, contextState, environmentPreamble, hookAgent } from './hook.ts';
-import { readBinding, bindingLine, BINDING_TTL_MS, bindingPath } from './binding.ts';
-import { claudeIdentity, resolveAgent } from './facade.ts';
 
 const SESSION = '11111111-1111-4111-8111-111111111111';
 const env = { FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_AGENT_ID: 'main' };
@@ -13,11 +11,9 @@ const env = { FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, F
 /** Capture the daemon calls a hook makes, and the binding it writes. */
 function recorder(state: any = { active: false }) {
   const calls: Array<[string, any]> = [];
-  const bound: string[] = [];
   return {
-    calls, bound,
+    calls,
     rpc: (async (op: string, body: any) => { calls.push([op, body]); return state; }) as any,
-    bind: async (agent: string) => { bound.push(agent); return true; },
   };
 }
 
@@ -31,7 +27,7 @@ test('canonical hook identity wins over another shell binding for observations a
   const dir = await mkdtemp(join(tmpdir(), 'forge-hook-identity-'));
   const hookEnv = { ...env, FORGE_CLAUDE_TOKEN_FILE: join(dir, 'instance-token') };
   try {
-    await writeFile(join(dir, 'agent-binding'), bindingLine('other-agent'));
+    await writeFile(join(dir, 'agent-binding'), JSON.stringify({ agent: 'other-agent', at: Date.now() }));
     for (const [event, agent] of [['Stop', 'main'], ['SubagentStop', 'child'], ['UserPromptSubmit', 'main'], ['SubagentStart', 'child']]) {
       const r = recorder({ active: true, issue: 'owned' });
       await handleHook({ hook_event_name: event, session_id: SESSION, agent_id: agent, stop_hook_active: true }, hookEnv, { rpc: r.rpc, publish: async () => true });
@@ -50,7 +46,7 @@ test('every documented Claude lifecycle event maps to the shared daemon event', 
   };
   for (const [event, daemon] of Object.entries(expected)) {
     const r = recorder();
-    await handleHook({ hook_event_name: event, session_id: SESSION }, env, { rpc: r.rpc, bind: r.bind, publish: async () => true });
+    await handleHook({ hook_event_name: event, session_id: SESSION }, env, { rpc: r.rpc, publish: async () => true });
     assert.equal(r.calls[0][0], 'event', event);
     assert.equal(r.calls[0][1].event, daemon, event);
     assert.equal(r.calls[0][1].identity.session_id, SESSION, event);
@@ -60,7 +56,7 @@ test('every documented Claude lifecycle event maps to the shared daemon event', 
 test('subagent events attribute to the real hook agent_id, not the main agent', async () => {
   for (const event of ['SubagentStart', 'SubagentStop', 'PreToolUse', 'PreCompact']) {
     const r = recorder();
-    await handleHook({ hook_event_name: event, session_id: SESSION, agent_id: 'child', agent_type: 'Explore' }, env, { rpc: r.rpc, bind: r.bind });
+    await handleHook({ hook_event_name: event, session_id: SESSION, agent_id: 'child', agent_type: 'Explore' }, env, { rpc: r.rpc });
     assert.equal(r.calls[0][1].identity.agent_id, 'child', event);
   }
 });
@@ -68,17 +64,17 @@ test('subagent events attribute to the real hook agent_id, not the main agent', 
 test('SessionStart injects the protocol and publishes the canonical session', async () => {
   const r = recorder();
   const published: string[] = [];
-  const output = await handleHook({ hook_event_name: 'SessionStart', session_id: SESSION, source: 'startup' }, env, { rpc: r.rpc, bind: r.bind, publish: async (s: string) => { published.push(s); return true; } });
+  const output = await handleHook({ hook_event_name: 'SessionStart', session_id: SESSION, source: 'startup' }, env, { rpc: r.rpc, publish: async (s: string) => { published.push(s); return true; } });
   assert.deepEqual(published, [SESSION]);
   assert.equal(output.hookSpecificOutput.hookEventName, 'SessionStart');
   assert.match(output.hookSpecificOutput.additionalContext, /Forge is this workspace's work ledger/);
-  assert.deepEqual(environmentPreamble(SESSION), `export FORGE_CLAUDE_SESSION_ID='${SESSION}'\nexport FORGE_CLAUDE_AGENT_ID='main'\n`);
+  assert.deepEqual(environmentPreamble(SESSION), `export FORGE_CLAUDE_SESSION_ID='${SESSION}'\nunset FORGE_CLAUDE_AGENT_ID\n`);
 });
 
 test('a subagent session start never publishes a global agent identity', async () => {
   const r = recorder();
   let published = false;
-  const output = await handleHook({ hook_event_name: 'SubagentStart', session_id: SESSION, agent_id: 'child' }, env, { rpc: r.rpc, bind: r.bind, publish: async () => { published = true; return true; } });
+  const output = await handleHook({ hook_event_name: 'SubagentStart', session_id: SESSION, agent_id: 'child' }, env, { rpc: r.rpc, publish: async () => { published = true; return true; } });
   assert.equal(published, false, 'a subagent overwrote the global agent identity');
   assert.equal(output.hookSpecificOutput.hookEventName, 'SubagentStart');
 });
@@ -86,7 +82,7 @@ test('a subagent session start never publishes a global agent identity', async (
 test('compaction refreshes context without creating, restoring or releasing execution', async () => {
   for (const [event, expected] of [['PreCompact', 'touch'], ['PostCompact', 'context']] as const) {
     const r = recorder({ active: true, pending: true });
-    const output = await handleHook({ hook_event_name: event, session_id: SESSION, trigger: 'auto' }, env, { rpc: r.rpc, bind: r.bind });
+    const output = await handleHook({ hook_event_name: event, session_id: SESSION, trigger: 'auto' }, env, { rpc: r.rpc });
     assert.equal(r.calls.length, 1, event);
     assert.equal(r.calls[0][1].event, expected);
     // PostCompact cannot inject context; PreCompact never injects either.
@@ -94,33 +90,28 @@ test('compaction refreshes context without creating, restoring or releasing exec
   }
 });
 
-test('PreToolUse binds the agent for Bash and file mutation, and never decides permissions', async () => {
-  for (const tool of ['Bash', 'Edit', 'Write', 'NotebookEdit']) {
+test('file tools remain unchanged and never change shell attribution or permissions', async () => {
+  for (const tool of ['Edit', 'Write', 'NotebookEdit', 'Read']) {
     const r = recorder();
-    const output = await handleHook({ hook_event_name: 'PreToolUse', session_id: SESSION, agent_id: 'child', tool_name: tool }, env, { rpc: r.rpc, bind: r.bind });
-    assert.deepEqual(r.bound, ['child'], tool);
-    // The adapter is not a permission boundary: no decision is ever returned.
-    assert.deepEqual(output, {}, tool);
+    const output = await handleHook({ hook_event_name: 'PreToolUse', session_id: SESSION, agent_id: 'child', tool_name: tool }, env, { rpc: r.rpc });
+    assert.deepEqual(output, {});
+    assert.equal(r.calls[0][1].identity.agent_id, 'child');
   }
-  const read = recorder();
-  await handleHook({ hook_event_name: 'PreToolUse', session_id: SESSION, agent_id: 'child', tool_name: 'Read' }, env, { rpc: read.rpc, bind: read.bind });
-  assert.deepEqual(read.bound, [], 'a read bound an agent unnecessarily');
 });
 
 test('tool observations are liveness only and never carry context', async () => {
   for (const event of ['PostToolUse', 'PostToolUseFailure']) {
     const r = recorder();
-    assert.deepEqual(await handleHook({ hook_event_name: event, session_id: SESSION, agent_id: 'child', tool_name: 'Bash' }, env, { rpc: r.rpc, bind: r.bind }), {});
+    assert.deepEqual(await handleHook({ hook_event_name: event, session_id: SESSION, agent_id: 'child', tool_name: 'Bash' }, env, { rpc: r.rpc }), {});
     // Liveness is still attributed to the right agent, but no binding is written.
     assert.equal(r.calls[0][1].identity.agent_id, 'child', event);
-    assert.deepEqual(r.bound, [], event);
   }
 });
 
 test('strict Stop blocks unresolved work once and pauses renewal; advisory only warns', async () => {
   const busy = { active: true, pending: false, issue: 'abc' };
   const strict = recorder(busy);
-  const blocked = await handleHook({ hook_event_name: 'Stop', session_id: SESSION, stop_hook_active: false }, env, { rpc: strict.rpc, bind: strict.bind });
+  const blocked = await handleHook({ hook_event_name: 'Stop', session_id: SESSION, stop_hook_active: false }, env, { rpc: strict.rpc });
   assert.equal(blocked.decision, 'block');
   assert.ok(blocked.reason);
   // Blocking continues the turn, so renewal must keep running: exactly one call.
@@ -128,7 +119,7 @@ test('strict Stop blocks unresolved work once and pauses renewal; advisory only 
   assert.equal(strict.calls[0][1].event, 'stop_check');
 
   const advisory = recorder(busy);
-  const warned = await handleHook({ hook_event_name: 'Stop', session_id: SESSION, stop_hook_active: false }, { ...env, FORGE_CLAUDE_STOP_POLICY: 'advisory' }, { rpc: advisory.rpc, bind: advisory.bind });
+  const warned = await handleHook({ hook_event_name: 'Stop', session_id: SESSION, stop_hook_active: false }, { ...env, FORGE_CLAUDE_STOP_POLICY: 'advisory' }, { rpc: advisory.rpc });
   assert.equal(warned.decision, undefined);
   assert.ok(warned.systemMessage);
   // A warned stop does let the agent stop, so renewal is paused.
@@ -137,25 +128,25 @@ test('strict Stop blocks unresolved work once and pauses renewal; advisory only 
 
   // An already-continued turn never blocks again.
   const again = recorder(busy);
-  assert.equal((await handleHook({ hook_event_name: 'Stop', session_id: SESSION, stop_hook_active: true }, env, { rpc: again.rpc, bind: again.bind })).decision, undefined);
+  assert.equal((await handleHook({ hook_event_name: 'Stop', session_id: SESSION, stop_hook_active: true }, env, { rpc: again.rpc })).decision, undefined);
 
   // A subagent stop is scoped to that subagent, not treated as session shutdown.
   const sub = recorder(busy);
-  await handleHook({ hook_event_name: 'SubagentStop', session_id: SESSION, agent_id: 'child', stop_hook_active: false }, env, { rpc: sub.rpc, bind: sub.bind });
+  await handleHook({ hook_event_name: 'SubagentStop', session_id: SESSION, agent_id: 'child', stop_hook_active: false }, env, { rpc: sub.rpc });
   assert.equal(sub.calls[0][1].identity.agent_id, 'child');
 });
 
 test('an idle Stop is a no-op and SessionEnd is retired immediately', async () => {
   const idle = recorder({ active: false, pending: false });
-  assert.deepEqual(await handleHook({ hook_event_name: 'Stop', session_id: SESSION }, env, { rpc: idle.rpc, bind: idle.bind }), {});
+  assert.deepEqual(await handleHook({ hook_event_name: 'Stop', session_id: SESSION }, env, { rpc: idle.rpc }), {});
   const end = recorder();
-  await handleHook({ hook_event_name: 'SessionEnd', session_id: SESSION, reason: 'logout' }, env, { rpc: end.rpc, bind: end.bind });
+  await handleHook({ hook_event_name: 'SessionEnd', session_id: SESSION, reason: 'logout' }, env, { rpc: end.rpc });
   assert.equal(end.calls[0][1].event, 'session_end');
 });
 
 test('invalid input and identity mismatch never reach the daemon', async () => {
   const r = recorder();
-  const deps = { rpc: r.rpc, bind: r.bind };
+  const deps = { rpc: r.rpc };
   await assert.rejects(handleHook(null, env, deps));
   await assert.rejects(handleHook({ hook_event_name: 'Stop' }, env, deps));
   await assert.rejects(handleHook({ hook_event_name: 'NotARealEvent', session_id: SESSION }, env, deps));
@@ -177,42 +168,4 @@ test('injected context carries workflow state and never execution plumbing', () 
   assert.equal(contextState(null), '{}');
   assert.equal(contextState('nope'), '{}');
   assert.equal(PROTOCOL.includes('execution_token'), false);
-});
-
-test('the CLI resolves the acting agent: explicit environment, then the binding', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'forge-binding-'));
-  const tokenFile = join(dir, 'instance-token');
-  const binding = join(dir, 'agent-binding');
-  const bindingEnv = { ...env, FORGE_CLAUDE_TOKEN_FILE: tokenFile };
-  try {
-    assert.equal(bindingPath(bindingEnv), binding);
-    assert.equal(resolveAgent(bindingEnv, () => undefined), 'main', 'no binding must fall back to the published agent');
-
-    // The binding describes the shell about to run, so it outranks the value
-    // SessionStart published. Claude runs that preamble for a subagent's Bash
-    // call too, so the published `main` must NOT win there.
-    assert.equal(resolveAgent(bindingEnv, () => 'child'), 'child', 'a published main must not outrank the current binding');
-
-    // With no binding, an explicitly set environment value applies; otherwise
-    // the harness default is `main`.
-    assert.equal(resolveAgent({ FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_TOKEN_FILE: tokenFile, FORGE_CLAUDE_AGENT_ID: 'worker-3' }, () => undefined), 'worker-3');
-    assert.equal(resolveAgent({ FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_TOKEN_FILE: tokenFile, FORGE_CLAUDE_AGENT_ID: '' }, () => undefined), undefined);
-    assert.equal(claudeIdentity({ FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_TOKEN_FILE: tokenFile }).agent_id, 'main');
-
-    // A real file round-trips, and a stale or malformed binding is ignored.
-    await writeFile(binding, bindingLine('child'), { mode: 0o600 });
-    assert.equal(readBinding(bindingEnv), 'child');
-    // End to end through the real reader: the published `main` must not win.
-    assert.equal(claudeIdentity({ ...bindingEnv, FORGE_CLAUDE_AGENT_ID: 'main' }).agent_id, 'child');
-    await writeFile(binding, JSON.stringify({ agent: 'child', at: Date.now() - BINDING_TTL_MS - 1 }));
-    assert.equal(readBinding(bindingEnv), undefined, 'a stale binding must not label a later call');
-    await writeFile(binding, JSON.stringify({ agent: 'child', at: Date.now() + 60_000 }));
-    assert.equal(readBinding(bindingEnv), undefined, 'a future-dated binding must be refused');
-    await writeFile(binding, JSON.stringify({ agent: 'child' }));
-    assert.equal(readBinding(bindingEnv), undefined, 'a timestamp-free binding must be refused');
-    await writeFile(binding, 'not json');
-    assert.equal(readBinding(bindingEnv), undefined);
-    assert.equal(readBinding({}), undefined, 'no token file means no binding');
-    assert.equal((await readFile(binding, 'utf8')), 'not json');
-  } finally { await rm(dir, { recursive: true, force: true }); }
 });

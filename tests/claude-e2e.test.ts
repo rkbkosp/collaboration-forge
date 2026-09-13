@@ -1,15 +1,74 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { startForge } from './harness.ts';
 import { claudeTool } from '../claude/facade.ts';
+import { launchClaude } from '../claude/launcher.ts';
+import { claudeRPC } from '../claude/transport.ts';
+import { handleHook, environmentPreamble } from '../claude/hook.ts';
 
 const launcher = fileURLToPath(new URL('../scripts/forge.mjs', import.meta.url));
 const { fakeClaude } = await import('./claude-fixtures/bin.mts');
+
+test('real forged: concurrent delayed Bash calls and Stop keep exact actor tenures', { timeout: 30_000 }, async () => {
+  const f = await startForge();
+  const exec = promisify(execFile);
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  const command = (...args: string[]) => [process.execPath, launcher, ...args].map(quote).join(' ');
+  try {
+    const main = (await f.admin(`/api/v1/projects/${f.projectID}/issues`, { title: 'Main tenure' })).issue;
+    const child = (await f.admin(`/api/v1/projects/${f.projectID}/issues`, { title: 'Child tenure' })).issue;
+    await launchClaude([], { ...process.env, FORGE_URL: f.url, FORGE_WORKER_TOKEN_FILE: join(f.dataDir, 'worker-token') }, {
+      register: (b, e) => claudeRPC('register', b, e),
+      end: (b, e) => claudeRPC('end', b, e),
+      run: async (_bin, _args, env) => {
+        const session = 'binding-regression';
+        const bash = async (agent: string, script: string) => {
+          const output = await handleHook({ hook_event_name: 'PreToolUse', session_id: session, agent_id: agent, tool_name: 'Bash', tool_input: { command: script } }, env);
+          assert.equal(output.hookSpecificOutput?.permissionDecision, undefined);
+          const updated = output.hookSpecificOutput?.updatedInput?.command;
+          assert.equal(typeof updated, 'string');
+          return exec('/bin/bash', ['-c', environmentPreamble(session) + updated], { env });
+        };
+        await bash('main', command('issue', 'claim', main.uid));
+        await bash('child', command('issue', 'claim', child.uid));
+        const close = JSON.stringify({ reason: 'audit-no-change', message: 'Generated regression fixture verifies actor isolation without requesting product changes.', evidence: [{ type: 'no-change-audit', rationale: 'Ephemeral local adapter test, no product change requested.' }] });
+        // One child shell issues a command after the old TTL. Other agents run
+        // meanwhile. It must still be unable to close main's live tenure.
+        await Promise.all([
+          assert.rejects(bash('child', `sleep 6\n${command('issue', 'close', main.uid, '--data', close)}`), (error: any) => {
+            assert.equal(JSON.parse(error.stderr).error.code, 'lease_required');
+            return true;
+          }),
+          bash('main', command('issue', 'comment', main.uid, '--body', 'main-concurrent')),
+          bash('sibling', command('issue', 'comment', main.uid, '--body', 'sibling-concurrent')),
+        ]);
+        const current = await f.admin(`/api/v1/projects/${f.projectID}/issues/${main.uid}`);
+        assert.equal(current.issue.status, 'open');
+        assert.match(current.lease.purpose, /thread main/);
+        const mainStop = await handleHook({ hook_event_name: 'Stop', session_id: session }, env);
+        assert.equal(mainStop.decision, 'block');
+        assert.ok(mainStop.reason.includes(main.uid));
+        await handleHook({ hook_event_name: 'SubagentStop', session_id: session, agent_id: 'child', stop_hook_active: true }, env);
+        assert.equal(JSON.parse((await bash('main', command('claude', 'status'))).stdout).paused, false);
+        assert.equal(JSON.parse((await bash('child', command('claude', 'status'))).stdout).paused, true);
+        await bash('child', command('issue', 'close', child.uid, '--data', close));
+        await bash('main', command('issue', 'close', main.uid, '--data', close));
+        for (const issue of [main, child]) {
+          const after = await f.admin(`/api/v1/projects/${f.projectID}/issues/${issue.uid}`);
+          assert.equal(after.issue.status, 'closed');
+          assert.equal(after.lease == null, true);
+        }
+        return { code: 0, signal: null };
+      },
+    });
+  } finally { await f.close(); }
+});
 
 /**
  * Real forged, real supervised launcher, real plugin hooks and the real CLI.

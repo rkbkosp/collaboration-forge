@@ -3,10 +3,8 @@
  *
  * It mimics how Claude Code actually runs a Bash tool call: fire the plugin's
  * `PreToolUse` hook for the acting agent, apply the `CLAUDE_ENV_FILE` preamble,
- * then run the command. Modelling that order matters — the binding that
- * `PreToolUse` writes is what attributes the shell, and Claude rewrites it before
- * every call, so a fixture that skips it would test a state the harness never
- * reaches.
+ * then execute the updated Bash input. Each command receives its own identity,
+ * and the preamble clears any identity left by a previous shell snapshot.
  *
  * The launcher injects `--plugin-dir` ahead of these arguments, which a script
  * receives as plain argv.
@@ -54,14 +52,19 @@ async function applyEnvPreamble() {
   for (const line of text.split('\n')) {
     const match = /^export ([A-Z0-9_]+)='(.*)'$/.exec(line.trim());
     if (match) process.env[match[1]] = match[2];
+    if (line.trim() === 'unset FORGE_CLAUDE_AGENT_ID') delete process.env.FORGE_CLAUDE_AGENT_ID;
   }
 }
 
 /** One Bash tool call as `agent` (omitted for the main agent). */
 async function bash(args: string[], agent?: string) {
-  await handleHook({ hook_event_name: 'PreToolUse', session_id: SESSION_ID, ...(agent ? { agent_id: agent } : {}), tool_name: 'Bash' });
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  const command = [process.execPath, forge, ...args].map(quote).join(' ');
+  const output = await handleHook({ hook_event_name: 'PreToolUse', session_id: SESSION_ID, ...(agent ? { agent_id: agent } : {}), tool_name: 'Bash', tool_input: { command } });
+  const updated = output.hookSpecificOutput?.updatedInput?.command;
+  if (typeof updated !== 'string') throw new Error('missing shell identity injection');
   await applyEnvPreamble();
-  const { stdout } = await exec(process.execPath, [forge, ...args], { env: process.env, timeout: 25_000 });
+  const { stdout } = await exec('/bin/bash', ['-c', updated], { env: process.env, timeout: 25_000 });
   return JSON.parse(stdout);
 }
 
@@ -74,7 +77,7 @@ try {
   emit({
     ready: true, instance: process.env.FORGE_CLAUDE_INSTANCE_ID,
     tokenFile: process.env.FORGE_CLAUDE_TOKEN_FILE, pid: process.pid,
-    session: process.env.FORGE_CLAUDE_SESSION_ID, agent: process.env.FORGE_CLAUDE_AGENT_ID,
+    session: process.env.FORGE_CLAUDE_SESSION_ID, agent: 'main',
   });
 } catch (error) {
   emit({ conflict: true, code: (error as any)?.code });

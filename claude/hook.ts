@@ -1,7 +1,7 @@
 import { claudeRPC, ClaudeError } from './transport.ts';
 import { validateIdentity } from './facade.ts';
 import { stopDecision } from '../client/runtime-stop.ts';
-import { writeBinding } from './binding.ts';
+import { bindBashInput } from './binding.ts';
 
 /**
  * The model-facing protocol note. It names only the ordinary workflow; private
@@ -23,14 +23,15 @@ export function hookAgent(input: any): string {
 }
 
 /**
- * Publish the canonical session identity for ordinary main-agent Bash calls.
+ * Publish the session and clear any agent left in a persisted shell snapshot.
  * `SessionStart` is the only event that carries the session id and can run
  * before any Bash tool, so it writes CLAUDE_ENV_FILE once. A subagent's
- * `agent_id` is deliberately NOT written here: several subagents can coexist,
- * so the hook binds it per invocation instead.
+ * `agent_id` is deliberately unset here: every Bash invocation must receive
+ * its own identity from PreToolUse, even when a previous shell exported one.
  */
 export function environmentPreamble(sessionId: string): string {
-  return `export FORGE_CLAUDE_SESSION_ID='${sessionId}'\nexport FORGE_CLAUDE_AGENT_ID='main'\n`;
+  const quoted = "'" + sessionId.replaceAll("'", "'\\''") + "'";
+  return `export FORGE_CLAUDE_SESSION_ID=${quoted}\nunset FORGE_CLAUDE_AGENT_ID\n`;
 }
 
 const EVENTS: Record<string, string> = {
@@ -57,8 +58,6 @@ export interface HookDependencies {
   rpc?: typeof claudeRPC;
   /** Persist the session environment. Returns false when CLAUDE_ENV_FILE is unusable. */
   publish?: (sessionId: string) => Promise<boolean>;
-  /** Record the agent bound to the next shell/edit invocation. */
-  bind?: (agent: string) => Promise<boolean>;
 }
 
 export async function handleHook(input: any, env: NodeJS.ProcessEnv = process.env, dependencies: HookDependencies = {}): Promise<any> {
@@ -102,11 +101,8 @@ export async function handleHook(input: any, env: NodeJS.ProcessEnv = process.en
     return { hookSpecificOutput: { hookEventName: name, additionalContext: PROTOCOL + '\n' + contextState(state) } };
   }
   if (name === 'PreToolUse') {
-    // Bind the current agent to the shell/edit about to run. This hook never
-    // returns a permission decision: Claude's own permission flow is untouched.
-    if (input.tool_name === 'Bash' || mutatesFiles(input.tool_name)) {
-      const bind = dependencies.bind ?? writeBinding;
-      await bind(hookAgent(input)).catch(() => false);
+    if (input.tool_name === 'Bash') {
+      return { hookSpecificOutput: { hookEventName: name, updatedInput: bindBashInput(input.tool_input, identity) } };
     }
     return {};
   }
@@ -144,9 +140,4 @@ async function publishSessionEnvironment(sessionId: string): Promise<boolean> {
   const { appendFile } = await import('node:fs/promises');
   await appendFile(file, environmentPreamble(sessionId));
   return true;
-}
-
-/** Edit/Write are the direct filesystem mutators Claude exposes. */
-export function mutatesFiles(toolName: unknown): boolean {
-  return toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit';
 }

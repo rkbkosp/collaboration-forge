@@ -66,7 +66,7 @@ checks only that subagent's own execution.
 | --- | --- |
 | SessionStart | Bind the session, publish it for Bash, inject the protocol and current state |
 | SubagentStart | Register the subagent and inject the same protocol; never claims work |
-| PreToolUse | Bind the current agent to the shell/edit about to run; never decides permissions |
+| PreToolUse | Inject the hook identity into this Bash command; file tools only observe liveness |
 | PostToolUse / PostToolUseFailure | Liveness observation only |
 | PreCompact / PostCompact | Refresh state and context; never create, restore, release or re-key an execution |
 | UserPromptSubmit | Resume observation if the lease is still live |
@@ -78,8 +78,17 @@ checks only that subagent's own execution.
 
 The model is never responsible for renewal, and a missing hook never costs the
 lease: forging stops renewal when the instance dies, and Kata's timed lease is
-the final recovery. Claude's own permission flow is untouched — this adapter
-never approves, denies or rewrites a tool call.
+the final recovery. The adapter returns `PreToolUse.updatedInput` for Bash with
+session and agent exports prepended to the original command. It preserves the
+other input fields and returns no permission decision. Claude evaluates its
+normal permission rules against that modified command; exact command rules may
+therefore need approval. See the [official hook contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
+
+Each shell keeps its identity across long commands and concurrent agents. There
+is no shared binding file or attribution timeout. `SessionStart` clears inherited
+agent attribution in the Bash preamble; a CLI call without per-command identity
+fails with `claude_identity_required` instead of defaulting to main. Lifecycle
+hooks use their payload directly, independently of all shell environment state.
 
 ## Stop policy
 

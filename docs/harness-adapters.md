@@ -588,12 +588,12 @@ On `SessionStart`, write the canonical value into `CLAUDE_ENV_FILE`:
 
 ```sh
 export FORGE_CLAUDE_SESSION_ID='...'
-export FORGE_CLAUDE_AGENT_ID='main'
+unset FORGE_CLAUDE_AGENT_ID
 ```
 
 `FORGE_CLAUDE_INSTANCE_ID` already comes from the launcher. This makes ordinary
-main-agent Bash calls see instance, session and main agent identity without
-model-visible protocol state.
+Bash calls see instance and session, but no inherited agent identity.
+`PreToolUse` supplies the actor separately for each command.
 
 ## 13. Claude subagent identity
 
@@ -619,8 +619,17 @@ For main-agent calls with no subagent ID:
 FORGE_CLAUDE_AGENT_ID=main
 ```
 
-The adapter injects/overwrites this value rather than trusting a model-provided
-value. This identity is still cooperative attribution, not a security boundary.
+The adapter returns `hookSpecificOutput.updatedInput` for Bash, preserving all
+other tool input fields and prepending quoted exports for session and agent to
+the original command. It returns no `permissionDecision`: Claude still evaluates
+permissions on the updated command. See the [official hook contract](https://code.claude.com/docs/en/hooks#pretooluse-decision-control).
+
+The identity lives in that shell for its entire invocation, including compound
+commands and background descendants. There is no shared last-writer binding or
+TTL. The session preamble unsets prior agent attribution, and a CLI without an
+injected actor fails closed instead of assuming main. Lifecycle events use their
+canonical payload identity directly. This remains cooperative attribution, not a
+security boundary.
 The private execution proof remains the actual execution credential.
 
 ## 14. Claude facade

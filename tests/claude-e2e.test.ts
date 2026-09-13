@@ -101,7 +101,7 @@ test('real forged: claim, subagent attribution, close and normal exit', { timeou
     const b = await f.start(issue.uid);
     assert.equal(b.ready.conflict, true);
 
-    a.child.stdin!.write('close\n');
+    a.child.stdin!.write('main close\n');
     assert.deepEqual(await a.next(), { closed: true });
     const closed = await f.admin(`/api/v1/projects/${f.projectID}/issues/${issue.uid}`);
     assert.equal(closed.issue.status, 'closed');

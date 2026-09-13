@@ -1,10 +1,14 @@
 /**
  * A fake Claude child, launched by the real `forge claude` supervisor.
  *
- * It drives the same code paths a Claude Code session would: it runs the real
- * plugin hooks through handleHook, applies the environment preamble Claude runs
- * before each Bash command, and then issues ordinary `forge` CLI commands. The
- * launcher injects `--plugin-dir` ahead of these arguments, which a script
+ * It mimics how Claude Code actually runs a Bash tool call: fire the plugin's
+ * `PreToolUse` hook for the acting agent, apply the `CLAUDE_ENV_FILE` preamble,
+ * then run the command. Modelling that order matters — the binding that
+ * `PreToolUse` writes is what attributes the shell, and Claude rewrites it before
+ * every call, so a fixture that skips it would test a state the harness never
+ * reaches.
+ *
+ * The launcher injects `--plugin-dir` ahead of these arguments, which a script
  * receives as plain argv.
  */
 import { execFile } from 'node:child_process';
@@ -41,11 +45,6 @@ function issueRef(argv: string[]): string {
 }
 const ref = issueRef(process.argv.slice(2));
 
-async function forgeCLI(args: string[], env: NodeJS.ProcessEnv) {
-  const { stdout } = await exec(process.execPath, [forge, ...args], { env, timeout: 25_000 });
-  return JSON.parse(stdout);
-}
-
 /** Claude Code runs the CLAUDE_ENV_FILE contents as a preamble before each Bash call. */
 async function applyEnvPreamble() {
   const file = process.env.CLAUDE_ENV_FILE;
@@ -58,13 +57,20 @@ async function applyEnvPreamble() {
   }
 }
 
+/** One Bash tool call as `agent` (omitted for the main agent). */
+async function bash(args: string[], agent?: string) {
+  await handleHook({ hook_event_name: 'PreToolUse', session_id: SESSION_ID, ...(agent ? { agent_id: agent } : {}), tool_name: 'Bash' });
+  await applyEnvPreamble();
+  const { stdout } = await exec(process.execPath, [forge, ...args], { env: process.env, timeout: 25_000 });
+  return JSON.parse(stdout);
+}
+
 // The real SessionStart hook, exactly as the plugin ships it.
 process.env.CLAUDE_ENV_FILE = join(process.env.FORGE_CLAUDE_ENV_DIR ?? await mkdtemp(join(tmpdir(), 'forge-claude-env-')), 'env.sh');
 await handleHook({ hook_event_name: 'SessionStart', session_id: SESSION_ID, source: 'startup' });
-await applyEnvPreamble();
 
 try {
-  await forgeCLI(['issue', 'claim', ref], process.env);
+  await bash(['issue', 'claim', ref]);
   emit({
     ready: true, instance: process.env.FORGE_CLAUDE_INSTANCE_ID,
     tokenFile: process.env.FORGE_CLAUDE_TOKEN_FILE, pid: process.pid,
@@ -81,41 +87,36 @@ for await (const line of lines) {
     await handleHook({ hook_event_name: 'SessionEnd', session_id: SESSION_ID, reason: 'prompt_input_exit' });
     break;
   }
-  if (line === 'close') {
-    const result = await forgeCLI(['issue', 'close', ref, '--data', JSON.stringify({
-      reason: 'audit-no-change',
-      message: 'This generated process lifecycle fixture verifies the Claude adapter end to end without changing product code.',
-      evidence: [{ type: 'no-change-audit', rationale: 'Ephemeral automated fixture with no product changes required.' }],
-    })], process.env);
-    emit({ closed: result.issue.status === 'closed' });
+  if (line.startsWith('main ')) {
+    const action = line.slice('main '.length);
+    if (action === 'close') {
+      const result = await bash(['issue', 'close', ref, '--data', JSON.stringify({
+        reason: 'audit-no-change',
+        message: 'This generated process lifecycle fixture verifies the Claude adapter end to end without changing product code.',
+        evidence: [{ type: 'no-change-audit', rationale: 'Ephemeral automated fixture with no product changes required.' }],
+      })]);
+      emit({ closed: result.issue.status === 'closed' });
+    }
   }
   if (line.startsWith('subagent ')) {
-    // A subagent's Bash call: its own PreToolUse binds it, and its shell carries
-    // no published agent, exactly as Claude provides it.
-    const action = line.split(' ')[1];
-    const agent = line.split(' ')[2];
-    await handleHook({ hook_event_name: 'PreToolUse', session_id: SESSION_ID, agent_id: agent, tool_name: 'Bash' });
-    const subEnv: NodeJS.ProcessEnv = { ...process.env };
-    delete subEnv.FORGE_CLAUDE_AGENT_ID;
+    const [action, agent] = line.slice('subagent '.length).split(' ');
     if (action === 'comment') {
       // Collaboration needs no lease, so this must succeed.
-      try {
-        await forgeCLI(['issue', 'comment', ref, '--body', 'subagent attribution probe'], subEnv);
-        emit({ subagent_comment: true });
-      } catch (error) { emit({ subagent_error: (error as any)?.code }); }
+      try { await bash(['issue', 'comment', ref, '--body', 'subagent attribution probe'], agent); emit({ subagent_comment: true }); }
+      catch (error) { emit({ subagent_error: (error as any)?.code }); }
     }
     if (action === 'claim') {
-      // The main agent holds this issue, and the subagent is a distinct
-      // execution identity, so its acquire must be denied.
-      const denied = await forgeCLI(['issue', 'claim', ref], subEnv).then(() => false, () => true);
+      // The main agent holds this issue, and the subagent is a distinct execution
+      // identity, so its acquire must be denied.
+      const denied = await bash(['issue', 'claim', ref], agent).then(() => false, () => true);
       emit({ subagent_claim_denied: denied });
     }
     if (action === 'close') {
       // No lease for this identity: a strict close must be refused outright.
-      const refused = await forgeCLI(['issue', 'close', ref, '--data', JSON.stringify({
+      const refused = await bash(['issue', 'close', ref, '--data', JSON.stringify({
         reason: 'audit-no-change', message: 'Subagent must not close work held by the main agent.',
         evidence: [{ type: 'no-change-audit', rationale: 'Negative fixture.' }],
-      })], subEnv).then(() => false, () => true);
+      })], agent).then(() => false, () => true);
       emit({ subagent_close_refused: refused });
     }
   }

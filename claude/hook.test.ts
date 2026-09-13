@@ -165,7 +165,7 @@ test('injected context carries workflow state and never execution plumbing', () 
   assert.equal(PROTOCOL.includes('execution_token'), false);
 });
 
-test('the CLI resolves the acting agent from the environment, then the binding', async () => {
+test('the CLI resolves the acting agent: explicit environment, then the binding', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'forge-binding-'));
   const tokenFile = join(dir, 'instance-token');
   const binding = join(dir, 'agent-binding');
@@ -174,18 +174,28 @@ test('the CLI resolves the acting agent from the environment, then the binding',
     assert.equal(bindingPath(bindingEnv), binding);
     assert.equal(resolveAgent(bindingEnv, () => undefined), 'main', 'no binding must fall back to the published agent');
 
-    // A subagent's shell sees no published agent, so its own binding decides.
-    const subEnv = { FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_TOKEN_FILE: tokenFile };
-    assert.equal(resolveAgent(subEnv, () => 'child'), 'child');
-    assert.equal(claudeIdentity({ ...subEnv, FORGE_CLAUDE_AGENT_ID: 'main' }).agent_id, 'main', 'the published environment must win');
+    // The binding describes the shell about to run, so it outranks the value
+    // SessionStart published. Claude runs that preamble for a subagent's Bash
+    // call too, so the published `main` must NOT win there.
+    assert.equal(resolveAgent(bindingEnv, () => 'child'), 'child', 'a published main must not outrank the current binding');
+
+    // With no binding, an explicitly set environment value applies; otherwise
+    // the harness default is `main`.
+    assert.equal(resolveAgent({ FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_TOKEN_FILE: tokenFile, FORGE_CLAUDE_AGENT_ID: 'worker-3' }, () => undefined), 'worker-3');
+    assert.equal(resolveAgent({ FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_TOKEN_FILE: tokenFile, FORGE_CLAUDE_AGENT_ID: '' }, () => undefined), undefined);
+    assert.equal(claudeIdentity({ FORGE_CLAUDE_INSTANCE_ID: 'i', FORGE_CLAUDE_SESSION_ID: SESSION, FORGE_CLAUDE_TOKEN_FILE: tokenFile }).agent_id, 'main');
 
     // A real file round-trips, and a stale or malformed binding is ignored.
     await writeFile(binding, bindingLine('child'), { mode: 0o600 });
     assert.equal(readBinding(bindingEnv), 'child');
+    // End to end through the real reader: the published `main` must not win.
+    assert.equal(claudeIdentity({ ...bindingEnv, FORGE_CLAUDE_AGENT_ID: 'main' }).agent_id, 'child');
     await writeFile(binding, JSON.stringify({ agent: 'child', at: Date.now() - BINDING_TTL_MS - 1 }));
     assert.equal(readBinding(bindingEnv), undefined, 'a stale binding must not label a later call');
     await writeFile(binding, JSON.stringify({ agent: 'child', at: Date.now() + 60_000 }));
     assert.equal(readBinding(bindingEnv), undefined, 'a future-dated binding must be refused');
+    await writeFile(binding, JSON.stringify({ agent: 'child' }));
+    assert.equal(readBinding(bindingEnv), undefined, 'a timestamp-free binding must be refused');
     await writeFile(binding, 'not json');
     assert.equal(readBinding(bindingEnv), undefined);
     assert.equal(readBinding({}), undefined, 'no token file means no binding');

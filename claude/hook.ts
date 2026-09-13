@@ -111,7 +111,7 @@ export async function handleHook(input: any, env: NodeJS.ProcessEnv = process.en
   if (STOP_EVENTS.has(name)) {
     // Scoped by session + agent: a subagent holding work is not the main agent
     // stopping, and one subagent ending is not the whole session ending.
-    const result = stopDecision(state, input, policy as 'strict' | 'advisory');
+    const result = stopDecision(state, input, policy as 'strict' | 'advisory', 'forge claude');
     // A pending request must keep its private retry identity: Stop never clears it.
     if (result.systemMessage) await rpc('event', { identity: claudeIdentity(hookEnv), event: 'pause' }, env, 650).catch(() => {});
     return result;

@@ -14,15 +14,30 @@ const valid = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\s\0]/.test(value);
 
 /**
- * Resolve the acting agent. The environment wins: `SessionStart` publishes
- * `main` globally for ordinary main-agent calls. When it is absent — which is
- * how a subagent's Bash call arrives, since a subagent must never be published
- * globally — the binding recorded by that agent's own `PreToolUse` is used.
+ * Resolve the acting agent, most specific first.
+ *
+ * The binding wins. This matters even though `SessionStart` publishes `main` into
+ * CLAUDE_ENV_FILE, and therefore into the environment of every Bash call: Claude
+ * runs that preamble for a subagent's shell too, and the subagent's `PreToolUse`
+ * writes its own binding first. If the published value outranked the binding,
+ * every subagent would be attributed to the main agent and its own acquire would
+ * target the main agent's tenure.
+ *
+ * With no binding (an ordinary main-agent call between shell invocations, or a
+ * stale one), the published value applies, defaulting to `main`.
+ *
+ * This is cooperative attribution, not authority: forged still enforces the
+ * worker credential, the instance capability and the exact live ClaimUID.
  */
 export function resolveAgent(env: NodeJS.ProcessEnv = process.env, read = readBinding): string | undefined {
-  const published = env.FORGE_CLAUDE_AGENT_ID;
-  if (valid(published)) return published;
-  try { return read(env); } catch { return undefined; }
+  // The binding describes the shell about to run, so it is the most specific
+  // signal and is consulted first.
+  let bound: string | undefined;
+  try { bound = read(env); } catch { bound = undefined; }
+  if (valid(bound)) return bound;
+  const explicit = env.FORGE_CLAUDE_AGENT_ID;
+  if (valid(explicit)) return explicit;
+  return undefined;
 }
 
 /** `agent_id` defaults to `main`, which is what a main-agent hook reports. */

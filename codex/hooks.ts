@@ -18,7 +18,7 @@ export async function handleHook(input:any,env:NodeJS.ProcessEnv=process.env,rpc
  if(name==='Stop'||name==='SubagentStop'){
   const policy=env.FORGE_CODEX_STOP_POLICY??'strict';
   if(policy!=='strict'&&policy!=='advisory')throw new CodexError('invalid_stop_policy');
-  const result=stopDecision(state,input,policy);
+  const result=stopDecision(state,input,policy,'forge codex');
   if(result.systemMessage)await rpc('event',{identity,event:'pause'},env,650);
   return result;
  }

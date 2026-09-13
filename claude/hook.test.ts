@@ -27,6 +27,20 @@ test('the main agent is the default actor and a subagent keeps its own agent_id'
   assert.equal(hookAgent({ agent_id: 'child-1' }), 'child-1');
 });
 
+test('canonical hook identity wins over another shell binding for observations and pause', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'forge-hook-identity-'));
+  const hookEnv = { ...env, FORGE_CLAUDE_TOKEN_FILE: join(dir, 'instance-token') };
+  try {
+    await writeFile(join(dir, 'agent-binding'), bindingLine('other-agent'));
+    for (const [event, agent] of [['Stop', 'main'], ['SubagentStop', 'child'], ['UserPromptSubmit', 'main'], ['SubagentStart', 'child']]) {
+      const r = recorder({ active: true, issue: 'owned' });
+      await handleHook({ hook_event_name: event, session_id: SESSION, agent_id: agent, stop_hook_active: true }, hookEnv, { rpc: r.rpc, publish: async () => true });
+      assert.equal(r.calls[0][1].identity.agent_id, agent, event);
+      for (const [, body] of r.calls) assert.equal(body.identity.agent_id, agent, event + ' pause');
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test('every documented Claude lifecycle event maps to the shared daemon event', async () => {
   const expected: Record<string, string> = {
     SessionStart: 'start', SubagentStart: 'start', PostCompact: 'context',

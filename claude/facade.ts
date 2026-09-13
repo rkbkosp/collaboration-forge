@@ -13,6 +13,12 @@ export type Identity = { instance_id: string; session_id: string; agent_id: stri
 const valid = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 128 && !/[\s\0]/.test(value);
 
+/** Validate an identity whose source has already been selected by the caller. */
+export function validateIdentity(identity: Identity): Identity {
+  if (!valid(identity.instance_id) || !valid(identity.session_id) || !valid(identity.agent_id)) throw new ClaudeError('claude_identity_required', false, { message: 'Claude harness identity is unavailable; launch with forge claude' });
+  return identity;
+}
+
 /**
  * Resolve the acting agent, most specific first.
  *
@@ -45,8 +51,7 @@ export function claudeIdentity(env: NodeJS.ProcessEnv = process.env): Identity {
   const instance_id = env.FORGE_CLAUDE_INSTANCE_ID;
   const session_id = env.FORGE_CLAUDE_SESSION_ID;
   const agent_id = resolveAgent(env) ?? 'main';
-  if (!valid(instance_id) || !valid(session_id) || !valid(agent_id)) throw new ClaudeError('claude_identity_required', false, { message: 'Claude harness identity is unavailable; launch with forge claude' });
-  return { instance_id, session_id, agent_id };
+  return validateIdentity({ instance_id: instance_id ?? '', session_id: session_id ?? '', agent_id });
 }
 
 /**

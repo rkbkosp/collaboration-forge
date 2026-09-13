@@ -1,5 +1,5 @@
 import { claudeRPC, ClaudeError } from './transport.ts';
-import { claudeIdentity } from './facade.ts';
+import { validateIdentity } from './facade.ts';
 import { stopDecision } from '../client/runtime-stop.ts';
 import { writeBinding } from './binding.ts';
 
@@ -73,11 +73,13 @@ export async function handleHook(input: any, env: NodeJS.ProcessEnv = process.en
   const event = EVENTS[name];
   if (!event) throw new ClaudeError('unsupported_hook');
 
-  const hookEnv: NodeJS.ProcessEnv = {
-    ...env,
-    FORGE_CLAUDE_SESSION_ID: input.session_id,
-    FORGE_CLAUDE_AGENT_ID: hookAgent(input),
-  };
+  // Lifecycle payloads are canonical. Shell attribution must never redirect a
+  // hook, including the subsequent pause after an advisory Stop.
+  const identity = validateIdentity({
+    instance_id: env.FORGE_CLAUDE_INSTANCE_ID ?? '',
+    session_id: input.session_id,
+    agent_id: hookAgent(input),
+  });
   // Validate configuration before touching the daemon, so a misconfigured policy
   // is a pure local decision rather than a lifecycle observation followed by a
   // failure.
@@ -87,7 +89,7 @@ export async function handleHook(input: any, env: NodeJS.ProcessEnv = process.en
   const rpc = dependencies.rpc ?? claudeRPC;
   // SessionEnd must be cheap: a session that is already ending must not wait on
   // network retries. A missed event is recovered by process liveness plus TTL.
-  const state = await rpc('event', { identity: claudeIdentity(hookEnv), event }, env, FAST_EVENTS.has(name) ? 650 : 2500);
+  const state = await rpc('event', { identity, event }, env, FAST_EVENTS.has(name) ? 650 : 2500);
 
   if (CONTEXT_EVENTS.has(name)) {
     // Bind the canonical session for later Bash calls before injecting context.
@@ -113,7 +115,7 @@ export async function handleHook(input: any, env: NodeJS.ProcessEnv = process.en
     // stopping, and one subagent ending is not the whole session ending.
     const result = stopDecision(state, input, policy as 'strict' | 'advisory', 'forge claude');
     // A pending request must keep its private retry identity: Stop never clears it.
-    if (result.systemMessage) await rpc('event', { identity: claudeIdentity(hookEnv), event: 'pause' }, env, 650).catch(() => {});
+    if (result.systemMessage) await rpc('event', { identity, event: 'pause' }, env, 650).catch(() => {});
     return result;
   }
   // Compaction and tool activity are liveness observations. PostCompact accepts

@@ -1,5 +1,5 @@
 import { codexTool } from '../codex/facade.ts';
-import { CodexError } from '../codex/transport.ts';
+import { claudeTool } from '../claude/facade.ts';
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -220,9 +220,14 @@ export async function main(argv: string[]): Promise<number> {
     }
     async function call(op:string,params:unknown={}):Promise<any> {
       if(!Object.hasOwn(toolSchemas,op) && !['issue_timeline','project'].includes(op))usage('Unknown worker operation');
-      if(env.FORGE_CODEX_INSTANCE_ID && (op.startsWith('issue_')||op.startsWith('checkout'))){
-        if(f.socket!==undefined||f['session-id']!==undefined)usage('Codex identity is harness-owned; do not override socket/session');
-        try{return await codexTool(op,params,env);}catch(e){if(e instanceof CodexError)throw new ForgeError(e.code,e.message,e.status,e.ambiguous,{hint:e.hint,data:e.data});throw e;}
+      // A supervised harness owns its instance capability and stores execution
+      // state in forged, so its ordinary commands route through the daemon
+      // facade instead of any inherited legacy socket.
+      const harness = env.FORGE_CODEX_INSTANCE_ID ? 'Codex' : env.FORGE_CLAUDE_INSTANCE_ID ? 'Claude' : undefined;
+      if(harness && (op.startsWith('issue_')||op.startsWith('checkout'))){
+        if(f.socket!==undefined||f['session-id']!==undefined)usage(harness+' identity is harness-owned; do not override socket/session');
+        const tool = env.FORGE_CODEX_INSTANCE_ID ? codexTool : claudeTool;
+        try{return await tool(op,params,env);}catch(e){if(e instanceof ForgeError)throw e;throw new ForgeError(String((e as any)?.code??'harness_error'),String((e as any)?.message??'Harness operation failed'),(e as any)?.status??0,(e as any)?.ambiguous===true,{hint:(e as any)?.hint,data:(e as any)?.data});}
       }
       if(socket)return requestSession(socket,{op,params});
       if(['checkout','issue_claim','issue_renew','issue_release','issue_close'].includes(op))usage('Execution requires a live session: forge session start, then --socket PATH');
@@ -245,6 +250,7 @@ export async function main(argv: string[]): Promise<number> {
     }
     if(words[0]==='session') {
       if(env.FORGE_CODEX_INSTANCE_ID)usage('Codex uses daemon execution state; use forge codex status/retry/pause');
+      if(env.FORGE_CLAUDE_INSTANCE_ID)usage('Claude uses daemon execution state; use forge claude status/retry/pause');
       count(2);flags();
       const action=words[1];
       if(action==='start') {

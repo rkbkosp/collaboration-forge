@@ -1,0 +1,8 @@
+{
+  "name": "forge",
+  "description": "Forge work ledger: claim Issues before executing, record durable findings, close with truthful typed evidence, and use isolated checkouts.",
+  "version": "0.1.0",
+  "author": { "name": "Collab Forge" },
+  "license": "MIT",
+  "keywords": ["forge", "issue-tracker", "leases", "work-ledger"]
+}
